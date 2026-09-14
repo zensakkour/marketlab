@@ -1,0 +1,40 @@
+name: Bug report
+description: Report reproducible incorrect behavior
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior
+      description: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should have happened?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Provide the smallest reliable reproduction.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment and version
+      placeholder: OS, compiler, MarketLab version or commit
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Add relevant logs or diagnostics, with secrets removed.
+      render: shell

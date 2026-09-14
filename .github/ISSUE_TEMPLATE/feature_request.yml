@@ -1,0 +1,27 @@
+name: Feature request
+description: Propose behavior that addresses a concrete use case
+title: "feature: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What concrete need should MarketLab address?
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Proposed behavior
+      description: What should MarketLab do?
+    validations:
+      required: true
+  - type: textarea
+    id: limitation
+    attributes:
+      label: Why current behavior is insufficient
+      description: Explain the gap in the current design or behavior.
+    validations:
+      required: true
