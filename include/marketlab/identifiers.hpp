@@ -30,6 +30,11 @@ struct EventSequence {
     auto operator<=>(const EventSequence&) const = default;
 };
 
+struct SimulationSequence {
+    std::uint64_t value{};
+    auto operator<=>(const SimulationSequence&) const = default;
+};
+
 // Numeric validity does not imply registration, ownership, or order-ID uniqueness.
 [[nodiscard]] constexpr bool is_valid(OrderId id) noexcept {
     return id.value != 0;
@@ -48,6 +53,10 @@ struct EventSequence {
 }
 
 [[nodiscard]] constexpr bool is_valid(EventSequence sequence) noexcept {
+    return sequence.value != 0;
+}
+
+[[nodiscard]] constexpr bool is_valid(SimulationSequence sequence) noexcept {
     return sequence.value != 0;
 }
 

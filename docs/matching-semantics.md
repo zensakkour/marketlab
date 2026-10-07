@@ -17,6 +17,11 @@ Instrument configuration requires a nonzero ID, a nonempty symbol, and a valid
 tick size. The symbol is a label; routing and request validation use instrument
 IDs. Symbols are retained as supplied without case conversion or trimming.
 
+The v0 domain represents participants through `ParticipantId`. A separate
+participant object is not required to identify order owners or execution
+counterparties. Registration belongs to exchange configuration; participant
+behavior and execution-based accounting are later components.
+
 The submitting participant supplies an order ID. Accepted order IDs are unique
 across the exchange instance for its entire lifetime, including filled,
 cancelled, and expired orders. A duplicate is rejected without affecting the
@@ -80,6 +85,24 @@ zero is valid. Requests are processed with nondecreasing timestamps. A backward
 timestamp is rejected without advancing logical time. v0 allows every request
 to use timestamp zero. Future scheduling must preserve this ordering contract.
 Wall-clock time and thread scheduling never determine priority.
+
+### Scheduled arrival records
+
+`SimulationEvent` represents a scheduled order or cancel arrival. Its request
+timestamp is the scheduled exchange-arrival time, and its `SimulationSequence`
+is distinct from exchange request/event sequences. The future scheduler assigns
+unique positive unsigned 64-bit sequences in scheduling insertion order, starting
+at one, without wrapping. Records order by arrival time first, then this sequence.
+At equal times, the request added to the schedule first reaches the exchange first,
+regardless of order ID, participant ID, or whether it is an order or cancellation.
+The exchange assigns its own request sequence when it processes the arrival.
+
+`is_valid(SimulationEvent)` checks assigned simulation identity and payload
+presence; it deliberately permits malformed request fields for exchange rejection.
+`scheduled_before()` compares scheduling keys only. Queue ownership, unique
+sequence assignment, capacity checks, scheduling relative to current time, and
+delivery behavior belong to the later scheduler. Participant actions and delayed
+report/market-data delivery are outside the current arrival-record scope.
 
 ## 5. Limit orders
 
@@ -237,6 +260,49 @@ acceptance, resting, and cancellation do not change filled positions or cash.
 Market data is derived from exchange state. Quotes and depth reflect the order
 book; trade information reflects executions. Market data must not become an
 independently mutated source of market state.
+
+### Current book primitives
+
+`OrderBook` owns resting records for one instrument using ordered price levels
+and FIFO queues, with a separate set of active order IDs. It is noncopyable and
+nonmovable. `insert_passive()` takes an intrinsically valid resting limit for its
+instrument, with an unused active ID and a request sequence greater than the last
+successful insertion. Sequence gaps are allowed; failed insertions reserve no ID
+and do not advance that insertion sequence. The outer exchange remains responsible
+for lifetime accepted-ID history, registration, and logical-clock validation.
+
+Passive insertion cannot leave a crossed book. `WouldCross` reports that the
+operation requires matching; it is not a new exchange rejection reason. Allocation
+failures propagate after rolling back storage changes. No events, executions,
+accounting changes, or cancellation are produced by this storage operation.
+
+`best_bid()` and `best_ask()` borrow read-only FIFO-head records from the highest
+bid or lowest ask level, returning null for empty sides. Callers must reacquire
+these pointers after mutation. Price levels contain individual quantities rather
+than an unchecked signed aggregate that could overflow with several large orders.
+
+`match_one()` consumes at most one eligible opposite FIFO head for an accepted
+limit order and a positive supplied remainder no greater than the original quantity.
+It validates record shape, instrument, absence of an active incoming ID, arrival
+sequence greater than the last successful insertion, and a nonzero caller-supplied
+execution sequence. Its `MatchError` values are operation diagnostics, not exchange
+rejection reasons. Errors and absence of eligible liquidity leave the book unchanged.
+
+A match returns one `Execution` and both remaining quantities without modifying
+the incoming record. It uses the resting price and the minimum of the supplied
+incoming remainder and the current resting remainder. The execution carries the
+incoming acceptance time/request sequence, supplied event sequence, both order IDs,
+and buyer/seller identities mapped from their actual sides. Partial resting fills
+retain their acceptance time, original quantity, and queue position. Full fills
+remove the active ID and FIFO head, and remove the level when empty. The operation
+allocates no memory.
+
+This primitive does not allocate sequences or advance the last insertion sequence;
+a subsequent passive remainder keeps its original incoming sequence. The future
+exchange must finish matching and rest or expire that remainder before another
+request interleaves, validate clock/registration/lifetime IDs, reserve counter/event
+capacity before mutation, and emit the prescribed ordered event stream. Market
+matching and automatic whole-request matching remain unimplemented.
 
 ## 12. Canonical examples
 

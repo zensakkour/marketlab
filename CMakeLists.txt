@@ -9,7 +9,8 @@ target_compile_features(marketlab INTERFACE cxx_std_23)
 
 include(CTest)
 if(BUILD_TESTING)
-    foreach(test_name IN ITEMS price domain requests orders events)
+    foreach(test_name IN ITEMS price domain requests orders events simulation
+                               order_book order_book_allocation order_book_matching)
         add_executable(${test_name}_tests tests/${test_name}_tests.cpp)
         target_link_libraries(${test_name}_tests PRIVATE marketlab)
         if(MSVC)

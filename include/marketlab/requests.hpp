@@ -57,7 +57,7 @@ struct OrderRequest {
     OrderType type{};
     // Preserve unvalidated numbers so the exchange can reject the submitted values.
     std::int64_t quantity_units{};
-    std::optional<std::int64_t> limit_price_ticks;
+    std::optional<std::int64_t> limit_price_ticks{};
 };
 
 struct CancelRequest {
