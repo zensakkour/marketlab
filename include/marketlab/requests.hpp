@@ -30,6 +30,24 @@ enum class RejectionReason {
     NotOwner,
 };
 
+[[nodiscard]] constexpr bool is_valid(RejectionReason reason) noexcept {
+    switch (reason) {
+    case RejectionReason::InvalidTimestamp:
+    case RejectionReason::InvalidInstrument:
+    case RejectionReason::InvalidParticipant:
+    case RejectionReason::InvalidOrderId:
+    case RejectionReason::InvalidSide:
+    case RejectionReason::InvalidOrderType:
+    case RejectionReason::InvalidQuantity:
+    case RejectionReason::InvalidPrice:
+    case RejectionReason::DuplicateOrderId:
+    case RejectionReason::NotActive:
+    case RejectionReason::NotOwner:
+        return true;
+    }
+    return false;
+}
+
 struct OrderRequest {
     LogicalTime timestamp{};
     InstrumentId instrument_id{};

@@ -41,10 +41,11 @@ Development is organized around small, validated implementation steps. After eac
 The current C++23 components are exact integer-tick prices, nonnegative
 quantities with checked subtraction, distinct order/participant/instrument IDs,
 order sides/types, logical timestamps, instrument tick configuration, and
-order/cancel request data. Logical timestamps count unsigned 64-bit nanoseconds
-from the simulation origin. Tick sizes use a positive decimal coefficient and a
-scale from 0 through 18; instrument configuration requires a nonzero ID and a
-nonempty symbol.
+order/cancel request data, accepted/resting order records, executions, and
+exchange-event records.
+Logical timestamps count unsigned 64-bit nanoseconds from the simulation origin.
+Tick sizes use a positive decimal coefficient and a scale from 0 through 18;
+instrument configuration requires a nonzero ID and a nonempty symbol.
 
 Submitted order quantities must be positive; zero is supported for remaining
 quantities after a complete fill. Requests retain raw quantity and tick-price
@@ -53,6 +54,24 @@ checks numeric IDs, side/type, quantity, and price fields in the specified order
 and returns an optional rejection reason. Registration, duplicates, clock
 ordering, active-order lookup, and cancellation ownership require the future
 exchange core; passing field validation alone does not accept an order.
+
+Accepted orders retain their original quantity and request sequence for arrival
+priority. Resting records require a limit order and a positive remainder no
+greater than its original quantity. Executions carry both order IDs, buyer and
+seller IDs, the aggressive side, exact price and quantity, logical time, and
+distinct request/event sequences. Record `is_valid()` checks intrinsic consistency;
+the future exchange must establish acceptance, book membership, and matching
+correctness. One execution represents one trade, including permitted self-matches.
+
+`ExchangeEvent` is a `std::variant` of the nine contract events: acceptance,
+execution, partial fill, full fill, resting, market-remainder expiry, cancellation,
+order rejection, and cancel rejection. Successful records require valid numeric
+IDs and quantities consistent with their status. Rejections retain the submitted
+request, including invalid fields, and its rejection reason. Backward-time
+rejections preserve the submitted timestamp while carrying current logical time.
+These are data records; event production, reason selection, and ordered emission
+will belong to the matching core.
+
 The matching contract is in [docs/matching-semantics.md](docs/matching-semantics.md).
 The order book and decimal price adapter are not implemented yet.
 
@@ -77,11 +96,12 @@ ctest --test-dir build/debug --output-on-failure
 ```
 
 Run each command after the previous one succeeds. Configuration creates the
-build files; building compiles the test executable; CTest runs it. Tests are
+build files; building compiles the test executables; CTest runs them. Tests are
 enabled explicitly, and compiler warnings are treated as errors.
 
 A successful test run ends with `100% tests passed, 0 tests failed`.
-Currently there are three registered tests: `price`, `domain`, and `requests`.
+Currently there are five registered tests: `price`, `domain`, `requests`, `orders`,
+and `events`.
 `--output-on-failure` prints diagnostics from failing tests, and CTest returns a
 nonzero exit code on failure.
 
@@ -103,6 +123,10 @@ $LASTEXITCODE
 $LASTEXITCODE
 .\build\debug\requests_tests.exe
 $LASTEXITCODE
+.\build\debug\orders_tests.exe
+$LASTEXITCODE
+.\build\debug\events_tests.exe
+$LASTEXITCODE
 ```
 
 In a Unix shell:
@@ -113,6 +137,10 @@ echo $?
 ./build/debug/domain_tests
 echo $?
 ./build/debug/requests_tests
+echo $?
+./build/debug/orders_tests
+echo $?
+./build/debug/events_tests
 echo $?
 ```
 

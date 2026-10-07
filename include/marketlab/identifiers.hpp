@@ -20,6 +20,16 @@ struct InstrumentId {
     auto operator<=>(const InstrumentId&) const = default;
 };
 
+struct RequestSequence {
+    std::uint64_t value{};
+    auto operator<=>(const RequestSequence&) const = default;
+};
+
+struct EventSequence {
+    std::uint64_t value{};
+    auto operator<=>(const EventSequence&) const = default;
+};
+
 // Numeric validity does not imply registration, ownership, or order-ID uniqueness.
 [[nodiscard]] constexpr bool is_valid(OrderId id) noexcept {
     return id.value != 0;
@@ -31,6 +41,14 @@ struct InstrumentId {
 
 [[nodiscard]] constexpr bool is_valid(InstrumentId id) noexcept {
     return id.value != 0;
+}
+
+[[nodiscard]] constexpr bool is_valid(RequestSequence sequence) noexcept {
+    return sequence.value != 0;
+}
+
+[[nodiscard]] constexpr bool is_valid(EventSequence sequence) noexcept {
+    return sequence.value != 0;
 }
 
 } // namespace marketlab

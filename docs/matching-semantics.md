@@ -68,6 +68,13 @@ increasing unsigned 64-bit sequence, starting at one, in entry-point call order.
 This sequence, not order ID or participant ID, establishes arrival order even
 when logical timestamps are equal. Rejected requests also receive a sequence.
 
+`RequestSequence` and `EventSequence` are distinct unsigned 64-bit types; zero
+is invalid for an assigned sequence. An `AcceptedOrder` retains its original
+quantity, acceptance time, and arrival request sequence. A `RestingOrder` pairs
+that record with a positive remaining quantity no greater than the original;
+only limit orders can rest. These records check intrinsic consistency through
+`is_valid()`; acceptance and book membership require authoritative exchange state.
+
 Logical timestamps are unsigned 64-bit nanoseconds from the simulation origin;
 zero is valid. Requests are processed with nondecreasing timestamps. A backward
 timestamp is rejected without advancing logical time. v0 allows every request
@@ -177,8 +184,8 @@ For an accepted new order, events occur in this order:
 
 1. `OrderAccepted`: ID, owner, side, type, original quantity, and optional limit price.
 2. For each match, `Execution`: aggressive and resting IDs, buyer and seller IDs,
-   execution price, and executed quantity. The event sequence identifies the
-   execution uniquely. Each execution is reported once, not once per side.
+   aggressive side, execution price, and executed quantity. The event sequence
+   identifies the execution uniquely. Each execution is reported once, not once per side.
 3. Immediately after each execution, the resting order's `OrderFilled` if its
    remaining quantity is zero, otherwise `OrderPartiallyFilled` with its remainder.
 4. Then the incoming order's `OrderFilled` or `OrderPartiallyFilled` on the same
@@ -192,6 +199,29 @@ A zero-execution market order emits `OrderAccepted`, then
 with order ID, owner, price, and cancelled remaining quantity. Failure emits
 only `CancelRejected`. Rejected new orders emit only `OrderRejected`.
 No additional per-side execution or market-data events are emitted by the core.
+
+The `Execution` record represents one trade without a separate duplicate trade
+record. Its aggressive side identifies which order is the buy: the aggressive
+order for `Buy`, or the resting order for `Sell`. The two order IDs must differ;
+buyer and seller participant IDs may be equal. `is_valid()` checks nonzero IDs
+and sequences, valid side, and positive quantity. The matching core must establish
+counterparty ownership, execution price, and available quantities from its orders.
+
+`ExchangeEvent` holds one of the nine event records in a `std::variant`. The
+non-execution records share an `EventHeader`; `Execution` already carries those
+metadata fields directly. An acceptance header must agree with its accepted
+order's instrument, acceptance time, and arrival sequence. Partial-fill, rested,
+expired, and cancelled quantities are positive; a full-fill remainder is zero.
+Successful records require nonzero numeric instrument, order, and participant IDs.
+
+Rejection records retain the entire original request and a reason valid for that
+request kind. Their header instrument matches the submitted instrument, even
+when zero. An `InvalidTimestamp` record requires an earlier submitted time than
+the event time; other rejection timestamps equal the submitted time because
+non-backward requests advance logical time. Record checks do not consult exchange
+state or establish rejection precedence, registration, ownership, quantity
+transitions, or the ordering/uniqueness of a stream. Those remain matching-core
+obligations.
 
 ## 11. Authoritative state
 
