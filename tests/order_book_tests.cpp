@@ -26,6 +26,11 @@ static_assert(std::is_same_v<decltype(std::declval<const OrderBook&>().best_bid(
 static_assert(std::is_same_v<decltype(std::declval<const OrderBook&>().best_ask()),
                              const RestingOrder*>);
 
+static_assert(std::is_same_v<decltype(std::declval<const OrderBook&>().find(OrderId{1})),
+                             const RestingOrder*>);
+static_assert(std::is_same_v<decltype(std::declval<OrderBook&>().find(OrderId{1})),
+                             const RestingOrder*>);
+
 RestingOrder make_order(std::uint64_t id, std::uint64_t sequence, Side side,
                         std::int64_t ticks) {
     const auto quantity = Quantity::from_units(5).value();
@@ -45,7 +50,73 @@ RestingOrder make_order(std::uint64_t id, std::uint64_t sequence, Side side,
     };
 }
 
+bool test_lookup_transitions() {
+    OrderBook book{InstrumentId{1}};
+    const auto first = make_order(30, 1, Side::Sell, 100);
+    const auto second = make_order(1, 2, Side::Sell, 100);
+    const auto worse = make_order(20, 3, Side::Sell, 101);
+    const auto own_side = make_order(40, 4, Side::Buy, 99);
+    for (const auto& resting : {first, second, worse, own_side}) {
+        if (book.insert_passive(resting) != PassiveInsertResult::Inserted) {
+            return false;
+        }
+    }
+    const auto* bid = book.best_bid();
+    const auto* ask = book.best_ask();
+    const auto* second_found = book.find(second.order.order_id);
+    const auto* worse_found = book.find(worse.order.order_id);
+    if (!second_found || !worse_found || book.find(first.order.order_id) != ask ||
+        book.find(own_side.order.order_id) != bid ||
+        second_found->order.order_id != second.order.order_id ||
+        worse_found->order.order_id != worse.order.order_id ||
+        book.best_bid() != bid || book.best_ask() != ask || book.order_count() != 4) {
+        return false;
+    }
+    auto incoming = make_order(99, 5, Side::Buy, 100).order;
+    incoming.original_quantity = Quantity::from_units(2).value();
+    const auto partial = book.match_one(incoming, incoming.original_quantity, {1});
+    const auto* remaining = book.find(first.order.order_id);
+    second_found = book.find(second.order.order_id);
+    if (!partial || !*partial || !remaining || remaining->remaining_quantity.units() != 3 ||
+        remaining->order.original_quantity.units() != 5 || remaining->order.arrival_sequence.value != 1 ||
+        remaining != book.best_ask() || book.find(incoming.order_id) ||
+        !second_found || second_found->remaining_quantity.units() != 5) {
+        return false;
+    }
+    incoming = make_order(98, 6, Side::Buy, 101).order;
+    const auto multi = book.process_limit(incoming, {2});
+    remaining = book.find(second.order.order_id);
+    worse_found = book.find(worse.order.order_id);
+    if (!multi || book.find(first.order.order_id) || book.find(incoming.order_id) ||
+        !remaining || remaining != book.best_ask() || remaining->remaining_quantity.units() != 3 ||
+        remaining->order.original_quantity.units() != 5 || remaining->order.arrival_sequence.value != 2 ||
+        !worse_found || worse_found->remaining_quantity.units() != 5) {
+        return false;
+    }
+    incoming = make_order(97, 7, Side::Buy, 101).order;
+    incoming.original_quantity = Quantity::from_units(10).value();
+    const auto rest = book.process_limit(incoming, {10});
+    remaining = book.find(incoming.order_id);
+    const auto* own_found = book.find(own_side.order.order_id);
+    if (!rest || book.find(second.order.order_id) || book.find(worse.order.order_id) ||
+        !remaining || remaining != book.best_bid() || remaining->remaining_quantity.units() != 2 ||
+        remaining->order.original_quantity.units() != 10 || remaining->order.arrival_sequence.value != 7 ||
+        !own_found || own_found->remaining_quantity.units() != 5 || book.best_ask()) {
+        return false;
+    }
+    auto sell = make_order(96, 8, Side::Sell, 101).order;
+    sell.original_quantity = Quantity::from_units(2).value();
+    const auto filled = book.process_limit(sell, {30});
+    return filled && !book.find(incoming.order_id) && !book.find(sell.order_id) &&
+        book.order_count() == 1 && book.find(own_side.order.order_id) == book.best_bid() &&
+        !book.find(OrderId{0}) && !book.find(OrderId{123});
+}
+
 int main() {
+    if (!test_lookup_transitions()) {
+        std::cerr << "active lookup lost a quantity transition or retained a completed order\n";
+        return 1;
+    }
     try {
         const OrderBook invalid{InstrumentId{0}};
         std::cerr << "zero instrument configured an order book\n";
@@ -54,7 +125,8 @@ int main() {
     }
     OrderBook book{InstrumentId{1}};
     if (book.instrument_id() != InstrumentId{1} || !book.empty() || book.order_count() != 0 ||
-        book.best_bid() || book.best_ask() || book.contains(OrderId{1})) {
+        book.best_bid() || book.best_ask() || book.contains(OrderId{1}) ||
+        book.find(OrderId{0}) || book.find(OrderId{1})) {
         std::cerr << "unexpected empty book state\n";
         return 1;
     }
@@ -90,6 +162,28 @@ int main() {
             std::cerr << "best price or FIFO head is incorrect\n";
             return 1;
         }
+    }
+
+    const OrderBook& view = book;
+    for (const auto& test : insertions) {
+        const auto* found = view.find(test.order.order.order_id);
+        const auto& expected = test.order.order;
+        if (!found || found->order.order_id != expected.order_id ||
+            found->order.participant_id != expected.participant_id ||
+            found->order.instrument_id != expected.instrument_id || found->order.side != expected.side ||
+            found->order.type != expected.type || found->order.limit_price != expected.limit_price ||
+            found->order.original_quantity != expected.original_quantity ||
+            found->order.accepted_at != expected.accepted_at ||
+            found->order.arrival_sequence != expected.arrival_sequence ||
+            found->remaining_quantity != test.order.remaining_quantity) {
+            std::cerr << "active lookup lost a resting record behind a FIFO head or at another level\n";
+            return 1;
+        }
+    }
+    if (view.find(OrderId{0}) || view.find(OrderId{100}) ||
+        view.find(OrderId{std::numeric_limits<std::uint64_t>::max()})) {
+        std::cerr << "unknown ID resolved to an active order\n";
+        return 1;
     }
 
     const auto candidate = make_order(100, 11, Side::Buy, 100);
@@ -176,7 +270,7 @@ int main() {
     auto small_bid = make_order(1, 1, Side::Buy, 1);
     small_bid.order.original_quantity = Quantity::from_units(1).value();
     small_bid.remaining_quantity = small_bid.order.original_quantity;
-    auto large_ask = make_order(2, maximum_sequence, Side::Sell, maximum_units);
+    auto large_ask = make_order(maximum_sequence, maximum_sequence, Side::Sell, maximum_units);
     large_ask.order.original_quantity = Quantity::from_units(maximum_units).value();
     large_ask.remaining_quantity = large_ask.order.original_quantity;
     large_ask.order.accepted_at = {maximum_sequence};
@@ -185,7 +279,9 @@ int main() {
         boundaries.best_bid()->order.limit_price->ticks() != 1 ||
         boundaries.best_bid()->remaining_quantity.units() != 1 ||
         boundaries.best_ask()->order.limit_price->ticks() != maximum_units ||
-        boundaries.best_ask()->remaining_quantity.units() != maximum_units) {
+        boundaries.best_ask()->remaining_quantity.units() != maximum_units ||
+        boundaries.find(OrderId{1}) != boundaries.best_bid() ||
+        boundaries.find(OrderId{maximum_sequence}) != boundaries.best_ask()) {
         std::cerr << "passive book lost exact numeric boundaries\n";
         return 1;
     }

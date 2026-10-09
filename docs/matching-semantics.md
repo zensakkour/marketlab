@@ -267,9 +267,10 @@ independently mutated source of market state.
 and FIFO queues, with a separate set of active order IDs. It is noncopyable and
 nonmovable. `insert_passive()` takes an intrinsically valid resting limit for its
 instrument, with an unused active ID and a request sequence greater than the last
-successful passive insertion or complete limit operation. Sequence gaps are
-allowed; failed insertions reserve no ID and do not advance arrival priority. The outer exchange remains responsible
-for lifetime accepted-ID history, registration, and logical-clock validation.
+successful passive insertion, complete limit operation, or cancellation.
+Sequence gaps are allowed; failed insertions reserve no ID and do not advance
+arrival priority. The outer exchange remains responsible for lifetime accepted-ID
+history, registration, and logical-clock validation.
 
 Passive insertion cannot leave a crossed book. `WouldCross` reports that the
 operation requires matching; it is not a new exchange rejection reason. Allocation
@@ -281,12 +282,22 @@ bid or lowest ask level, returning null for empty sides. Callers must reacquire
 these pointers after mutation. Price levels contain individual quantities rather
 than an unchecked signed aggregate that could overflow with several large orders.
 
+`find(OrderId)` borrows a read-only active resting record, or returns null for zero
+or absent IDs. It resolves both sides, every price level, and non-head FIFO entries,
+with current remaining quantity and original acceptance metadata. Partial fills
+remain discoverable; completed orders disappear. Callers must reacquire views
+after mutation. Lookup rejects absent IDs through the active-ID set and scans
+owned queues for present IDs (linear in active orders), without allocation or
+state changes. No pointer index is maintained. This query neither validates a
+cancellation request nor checks its ownership; the separate `cancel()` operation
+follows section 8 as described below.
+
 `match_one()` consumes at most one eligible opposite FIFO head for an accepted
 limit order and a positive supplied remainder no greater than the original quantity.
 It validates record shape, instrument, absence of an active incoming ID, arrival
-sequence greater than the last successful passive insertion or complete limit
-operation, and a nonzero caller-supplied execution sequence. Its `MatchError` values are operation diagnostics, not exchange
-rejection reasons. Errors and absence of eligible liquidity leave the book unchanged.
+sequence greater than the last successful passive insertion, complete limit
+operation, or cancellation, and a nonzero caller-supplied execution sequence.
+Its `MatchError` values are operation diagnostics, not exchange rejection reasons. Errors and absence of eligible liquidity leave the book unchanged.
 
 A match returns one `Execution` and both remaining quantities without modifying
 the incoming record. It uses the resting price and the minimum of the supplied
@@ -343,7 +354,30 @@ unchanged; allocation exceptions propagate.
 The caller still establishes exchange acceptance, clock/registration/lifetime-ID
 validity, request-sequence assignment, global event-counter uniqueness, and event
 recording. `process_limit()` neither accepts raw requests nor emits rejections.
-Market matching, cancellation, and the exchange entry point remain unimplemented.
+Market matching and the exchange entry point remain unimplemented.
+
+`cancel()` takes a `CancelRequest` and caller-assigned request/event sequences,
+returning `std::expected<OrderCancelled, CancelError>`. It checks the instrument
+against the book (including zero), nonzero participant/target IDs, positive request
+sequence greater than the last successful book operation, positive event sequence,
+active lookup, and ownership, in that order. `NotActive` precedes `NotOwner`.
+Clock ordering, configured participant registration, and global counter capacity
+are caller prerequisites; this primitive does not select raw exchange rejections.
+
+On success it captures the cancellation record before erasing the resting entry,
+removes that active ID and any empty price level, and advances book arrival
+priority. Removing a FIFO entry preserves survivor order and original metadata.
+The record reports only the unfilled remainder at the original limit price,
+stamped with request time and supplied sequences. Cancellation allocates no memory;
+value assignment and return construction are checked as nonthrowing. Callers must
+reacquire all borrowed views after mutation, including views of other queue entries.
+
+All diagnostics leave state and book arrival priority unchanged. A single assigned
+request/event sequence equal to the unsigned maximum is usable without increment
+or wrap; subsequent global counter management remains with the exchange. The
+exchange must retain lifetime accepted-ID history and emit `CancelRejected` when
+appropriate. The primitive returns one successful record or a diagnostic, with
+no executions, accounting changes, or rejection-event production.
 
 ## 12. Canonical examples
 

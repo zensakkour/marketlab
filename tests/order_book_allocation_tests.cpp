@@ -125,7 +125,66 @@ bool test_limit_allocations() {
     return true;
 }
 
+bool test_cancel_allocations() {
+    using marketlab::AcceptedOrder;
+    using marketlab::CancelError;
+    using marketlab::CancelRequest;
+    using marketlab::InstrumentId;
+    using marketlab::OrderBook;
+    using marketlab::OrderId;
+    using marketlab::OrderType;
+    using marketlab::PassiveInsertResult;
+    using marketlab::Price;
+    using marketlab::Quantity;
+    using marketlab::Side;
+    for (const auto side : {Side::Buy, Side::Sell}) {
+        OrderBook book{InstrumentId{1}};
+        for (std::uint64_t id = 1; id <= 6; ++id) {
+            const auto quantity = Quantity::from_units(5).value();
+            const AcceptedOrder order{.order_id = {id}, .participant_id = {1}, .instrument_id = {1},
+                .side = side, .type = OrderType::Limit, .original_quantity = quantity,
+                .limit_price = Price::from_ticks(id == 6 ? (side == Side::Buy ? 99 : 101) : 100).value(),
+                .accepted_at = {0}, .arrival_sequence = {id}};
+            if (book.insert_passive({order, quantity}) != PassiveInsertResult::Inserted) {
+                return false;
+            }
+        }
+        const CancelRequest wrong_owner{{0}, {1}, {2}, {3}};
+        const CancelRequest missing{{0}, {1}, {1}, {99}};
+        std::uint64_t sequence = 7;
+        for (const std::uint64_t id : {3, 1, 5, 2, 4, 6}) {
+            const CancelRequest request{{0}, {1}, {1}, {id}};
+            allocations_before_failure = 0;
+            try {
+                const auto absent = book.cancel(missing, {sequence}, {sequence});
+                const auto owner = id == 3 ? book.cancel(wrong_owner, {sequence}, {sequence})
+                                          : book.cancel(missing, {sequence}, {sequence});
+                const auto result = book.cancel(request, {sequence}, {sequence});
+                allocations_before_failure = -1;
+                if (absent || absent.error() != CancelError::NotActive || owner ||
+                    owner.error() != (id == 3 ? CancelError::NotOwner : CancelError::NotActive) ||
+                    !result || result->cancelled_quantity.units() != 5 || book.contains(OrderId{id}) ||
+                    book.find(OrderId{id})) {
+                    return false;
+                }
+            } catch (const std::bad_alloc&) {
+                allocations_before_failure = -1;
+                std::cerr << "cancellation attempted to allocate\n";
+                return false;
+            }
+            ++sequence;
+        }
+        if (!book.empty() || book.best_bid() || book.best_ask()) {
+            return false;
+        }
+    }
+    return true;
+}
+
 int main() {
+    if (!test_cancel_allocations()) {
+        return 1;
+    }
     if (!test_limit_allocations()) {
         return 1;
     }
@@ -206,6 +265,20 @@ int main() {
 
     OrderBook matching{InstrumentId{1}};
     if (matching.insert_passive(resting) != PassiveInsertResult::Inserted) {
+        return 1;
+    }
+    allocations_before_failure = 0;
+    try {
+        const auto* found = matching.find(resting.order.order_id);
+        const auto* missing = matching.find(marketlab::OrderId{999});
+        allocations_before_failure = -1;
+        if (found != matching.best_bid() || missing) {
+            std::cerr << "allocation-free lookup returned an incorrect record\n";
+            return 1;
+        }
+    } catch (const std::bad_alloc&) {
+        allocations_before_failure = -1;
+        std::cerr << "active lookup attempted to allocate\n";
         return 1;
     }
     for (const int units : {2, 3}) {

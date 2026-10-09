@@ -43,7 +43,8 @@ quantities with checked subtraction, distinct order/participant/instrument IDs,
 order sides/types, logical timestamps, instrument tick configuration,
 order/cancel requests, accepted/resting orders, executions, exchange events,
 scheduled request records, passive order-book storage, single-match limit fills,
-read-only match counting, and complete accepted-limit processing.
+read-only match counting, complete accepted-limit processing, active-order lookup,
+and owned-order cancellation.
 Logical timestamps count unsigned 64-bit nanoseconds from the simulation origin.
 Tick sizes use a positive decimal coefficient and a scale from 0 through 18;
 instrument configuration requires a nonzero ID and a nonempty symbol.
@@ -56,9 +57,9 @@ Submitted order quantities must be positive; zero is supported for remaining
 quantities after a complete fill. Requests retain raw quantity and tick-price
 values so invalid submissions can be rejected explicitly. `validate_fields()`
 checks numeric IDs, side/type, quantity, and price fields in the specified order
-and returns an optional rejection reason. Registration, duplicates, clock
-ordering, active-order lookup, and cancellation ownership require the future
-exchange core; passing field validation alone does not accept an order.
+and returns an optional rejection reason. Registration, lifetime duplicates, and
+clock ordering require the future exchange core; passing field validation alone
+does not accept an order.
 
 Accepted orders retain their original quantity and request sequence for arrival
 priority. Resting records require a limit order and a positive remainder no
@@ -74,8 +75,9 @@ order rejection, and cancel rejection. Successful records require valid numeric
 IDs and quantities consistent with their status. Rejections retain the submitted
 request, including invalid fields, and its rejection reason. Backward-time
 rejections preserve the submitted timestamp while carrying current logical time.
-These are data records; event production, reason selection, and ordered emission
-will belong to the matching core.
+`process_limit()` produces accepted-limit events, and `cancel()` returns a
+successful cancellation record. Raw request rejection selection and market-order
+processing require the future exchange core.
 
 `SimulationEvent` holds a raw order or cancel request and a distinct simulation
 sequence. The request timestamp is its scheduled exchange-arrival time.
@@ -91,6 +93,13 @@ checks record validity, instrument, duplicate IDs, increasing arrival sequences,
 and a non-crossing price. Failures leave the book unchanged, including allocation
 failures. `best_bid()` and `best_ask()` return read-only pointers to the FIFO head
 at the best price, or `nullptr` for an empty side; reacquire pointers after mutation.
+
+`find(OrderId)` returns the current active resting record by ID, including orders
+behind a FIFO head and at other price levels, or `nullptr` for zero/absent IDs.
+It returns a read-only borrowed pointer; reacquire it after mutation. Lookup checks
+the active-ID set, then scans owned queues without allocation or state changes.
+Present-order lookup is linear in active orders; no performance claim is made.
+It provides current ownership and remainder data for cancellation.
 The book cannot be copied or moved. Its insertion results are storage diagnostics,
 not exchange rejections: `WouldCross` means matching is required.
 
@@ -123,10 +132,21 @@ liquidity. Diagnostic errors or allocation failures leave the book unchanged;
 allocation failures propagate. Successful processing advances book arrival priority,
 even when the incoming order is fully filled.
 
-These operations consume trusted accepted records. A future exchange must validate
+`cancel(request, request_sequence, event_sequence)` removes an active order owned
+by the requesting participant and returns its `OrderCancelled` record. It checks
+the book instrument, nonzero participant/target IDs, increasing positive request
+sequence, positive event sequence, active status, and ownership before mutation.
+The record contains the cancellation timestamp, supplied sequences, owner, price,
+and remaining quantity. Removal preserves survivor FIFO/metadata and deletes empty
+levels and active IDs. The operation allocates no memory. `CancelError` diagnostics
+leave the book unchanged; successful cancellation advances book arrival priority.
+Clock/registration checks, global counter ownership, lifetime accepted-ID history,
+and creation of `CancelRejected` events belong to the future exchange.
+
+Limit operations consume trusted accepted records. A future exchange must validate
 raw requests, registration, logical time, and lifetime accepted-ID uniqueness, own
 request/event counters across calls, and record returned events. Market orders,
-cancellation, the exchange entry point, and the decimal price adapter remain future
+the exchange entry point, and the decimal price adapter remain future
 work. This single-writer book does not invoke callbacks or publish intermediate state.
 
 ### Requirements
@@ -154,9 +174,9 @@ build files; building compiles the test executables; CTest runs them. Tests are
 enabled explicitly, and compiler warnings are treated as errors.
 
 A successful test run ends with `100% tests passed, 0 tests failed`.
-Currently there are ten registered tests: `price`, `domain`, `requests`, `orders`,
+Currently there are eleven registered tests: `price`, `domain`, `requests`, `orders`,
 `events`, `simulation`, `order_book`, `order_book_allocation`, `order_book_matching`,
-and `order_book_limit`.
+`order_book_limit`, and `order_book_cancel`.
 `--output-on-failure` prints diagnostics from failing tests, and CTest returns a
 nonzero exit code on failure.
 
@@ -174,7 +194,7 @@ cmake -S . -B build/debug -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -
 
 ### Run an executable directly
 
-The runnable targets exercise domain types, storage, and limit processing.
+The runnable targets exercise domain types and book operations.
 A simulation executable will be added when the exchange core exists. CTest is the usual way to run tests;
 you can also run any test directly after building.
 
@@ -201,6 +221,8 @@ $LASTEXITCODE
 $LASTEXITCODE
 .\build\debug\order_book_limit_tests.exe
 $LASTEXITCODE
+.\build\debug\order_book_cancel_tests.exe
+$LASTEXITCODE
 ```
 
 In a Unix shell:
@@ -226,6 +248,8 @@ echo $?
 echo $?
 ./build/debug/order_book_limit_tests
 echo $?
+./build/debug/order_book_cancel_tests
+echo $?
 ```
 
 Each test is silent on success and returns exit code `0`. On failure it prints a
@@ -244,12 +268,12 @@ ctest --test-dir build/release --output-on-failure
 ### GCC checked-container tests
 
 GCC/libstdc++ can also check container and iterator operations at runtime in a
-separate build. These commands build and run only the four order-book tests:
+separate build. These commands build and run only the five order-book tests:
 
 ```powershell
 cmake -S . -B build/checked -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DCMAKE_CXX_FLAGS=-D_GLIBCXX_DEBUG
-cmake --build build/checked --target order_book_tests order_book_allocation_tests order_book_matching_tests order_book_limit_tests
-ctest --test-dir build/checked --output-on-failure -R "^order_book(_allocation|_matching|_limit)?$"
+cmake --build build/checked --target order_book_tests order_book_allocation_tests order_book_matching_tests order_book_limit_tests order_book_cancel_tests
+ctest --test-dir build/checked --output-on-failure -R "^order_book(_allocation|_matching|_limit|_cancel)?$"
 ```
 
 Keep this build separate: the flag changes standard-container layouts, so code

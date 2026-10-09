@@ -6,6 +6,7 @@
 #include <marketlab/orders.hpp>
 #include <marketlab/price.hpp>
 #include <marketlab/quantity.hpp>
+#include <marketlab/requests.hpp>
 #include <marketlab/side.hpp>
 
 #include <algorithm>
@@ -44,6 +45,17 @@ enum class MatchError {
     OutputCapacityExceeded,
 };
 
+enum class CancelError {
+    InvalidInstrument,
+    InvalidParticipant,
+    InvalidOrderId,
+    InvalidRequestSequence,
+    OutOfOrder,
+    InvalidEventSequence,
+    NotActive,
+    NotOwner,
+};
+
 struct SingleMatch {
     Execution execution;
     Quantity incoming_remaining;
@@ -80,6 +92,23 @@ public:
 
     [[nodiscard]] bool contains(OrderId id) const {
         return order_ids_.contains(id);
+    }
+
+    // Active records only; reacquire this borrowed view after any book mutation.
+    [[nodiscard]] const RestingOrder* find(OrderId id) const {
+        if (!contains(id)) {
+            return nullptr;
+        }
+        for (const auto* levels : {&bids_, &asks_}) {
+            for (const auto& level : *levels) {
+                const auto position = std::find_if(level.second.begin(), level.second.end(),
+                    [id](const RestingOrder& resting) { return resting.order.order_id == id; });
+                if (position != level.second.end()) {
+                    return &*position;
+                }
+            }
+        }
+        return nullptr;
     }
 
     // Borrowed read-only records: callers must reacquire them after a mutation.
@@ -223,6 +252,58 @@ public:
         }
         last_arrival_sequence_ = incoming.arrival_sequence;
         return result;
+    }
+
+    // Clock/registration validation and counter ownership belong to the exchange.
+    // Failures leave the book unchanged; success returns one cancellation record.
+    [[nodiscard]] std::expected<OrderCancelled, CancelError> cancel(
+        const CancelRequest& request, RequestSequence arrival_sequence, EventSequence event_sequence) {
+        if (request.instrument_id != instrument_id_) {
+            return std::unexpected{CancelError::InvalidInstrument};
+        }
+        if (!is_valid(request.participant_id)) {
+            return std::unexpected{CancelError::InvalidParticipant};
+        }
+        if (!is_valid(request.target_order_id)) {
+            return std::unexpected{CancelError::InvalidOrderId};
+        }
+        if (!is_valid(arrival_sequence)) {
+            return std::unexpected{CancelError::InvalidRequestSequence};
+        }
+        if (arrival_sequence <= last_arrival_sequence_) {
+            return std::unexpected{CancelError::OutOfOrder};
+        }
+        if (!is_valid(event_sequence)) {
+            return std::unexpected{CancelError::InvalidEventSequence};
+        }
+        const auto* resting = find(request.target_order_id);
+        if (!resting) {
+            return std::unexpected{CancelError::NotActive};
+        }
+        if (resting->order.participant_id != request.participant_id) {
+            return std::unexpected{CancelError::NotOwner};
+        }
+        const OrderCancelled event{
+            EventHeader{request.timestamp, event_sequence, arrival_sequence, instrument_id_},
+            resting->order.order_id, resting->order.participant_id,
+            *resting->order.limit_price, resting->remaining_quantity,
+        };
+        auto& levels = resting->order.side == Side::Buy ? bids_ : asks_;
+        const auto level = levels.find(event.price);
+        const auto position = std::find_if(level->second.begin(), level->second.end(),
+            [&](const RestingOrder& order) { return order.order.order_id == event.order_id; });
+        // Erasing a middle deque element shifts value records. Their assignment
+        // and the returned record must not throw after state begins to change.
+        static_assert(std::is_nothrow_move_assignable_v<RestingOrder>);
+        static_assert(std::is_nothrow_constructible_v<
+            std::expected<OrderCancelled, CancelError>, const OrderCancelled&>);
+        level->second.erase(position);
+        order_ids_.erase(event.order_id);
+        if (level->second.empty()) {
+            levels.erase(level);
+        }
+        last_arrival_sequence_ = arrival_sequence;
+        return event;
     }
 
 private:
