@@ -42,7 +42,8 @@ The current C++23 components are exact integer-tick prices, nonnegative
 quantities with checked subtraction, distinct order/participant/instrument IDs,
 order sides/types, logical timestamps, instrument tick configuration,
 order/cancel requests, accepted/resting orders, executions, exchange events,
-scheduled request records, passive order-book storage, and single-match limit fills.
+scheduled request records, passive order-book storage, single-match limit fills,
+read-only match counting, and complete accepted-limit processing.
 Logical timestamps count unsigned 64-bit nanoseconds from the simulation origin.
 Tick sizes use a positive decimal coefficient and a scale from 0 through 18;
 instrument configuration requires a nonzero ID and a nonempty symbol.
@@ -102,11 +103,31 @@ resting fills keep priority; full fills remove the order, its active ID, and any
 empty price level. The incoming record is unchanged and its remainder is returned
 to the caller. Matching allocates no memory and permits the specified self-matches.
 
-The caller supplies the execution sequence. A future exchange will validate and
-process each entire request atomically, allocate unique sequences, record executions,
-emit ordered events, and continue matching before resting or expiring the remainder.
-Whole-request matching, market orders, cancellation, exchange acceptance, and the
-decimal price adapter remain future work.
+`match_count()` returns the number of executions needed for an accepted limit
+remainder against the current book, or a `MatchError` for invalid input. It walks
+eligible price levels in FIFO order without changing the book or allocating memory,
+and stops when the remainder is filled or the limit excludes further liquidity.
+It uses current remaining quantities and avoids summing liquidity, which could
+overflow. This supports capacity checks before complete limit processing;
+the single writer must keep the book unchanged between counting and matching.
+The count does not reserve output storage, assign sequences, or process a request.
+
+`process_limit()` handles a complete accepted limit across eligible price levels,
+then rests any positive remainder at its original limit and arrival priority. Its
+`LimitResult` contains the ordered `ExchangeEvent` records and remaining quantity:
+acceptance, then execution/resting status/incoming status for each match, followed
+by resting when applicable. The caller supplies the first event sequence; the
+operation checks the exact contiguous range without wrapping before changing state.
+It reserves event storage and prepares any resting remainder before consuming
+liquidity. Diagnostic errors or allocation failures leave the book unchanged;
+allocation failures propagate. Successful processing advances book arrival priority,
+even when the incoming order is fully filled.
+
+These operations consume trusted accepted records. A future exchange must validate
+raw requests, registration, logical time, and lifetime accepted-ID uniqueness, own
+request/event counters across calls, and record returned events. Market orders,
+cancellation, the exchange entry point, and the decimal price adapter remain future
+work. This single-writer book does not invoke callbacks or publish intermediate state.
 
 ### Requirements
 
@@ -133,8 +154,9 @@ build files; building compiles the test executables; CTest runs them. Tests are
 enabled explicitly, and compiler warnings are treated as errors.
 
 A successful test run ends with `100% tests passed, 0 tests failed`.
-Currently there are nine registered tests: `price`, `domain`, `requests`, `orders`,
-`events`, `simulation`, `order_book`, `order_book_allocation`, and `order_book_matching`.
+Currently there are ten registered tests: `price`, `domain`, `requests`, `orders`,
+`events`, `simulation`, `order_book`, `order_book_allocation`, `order_book_matching`,
+and `order_book_limit`.
 `--output-on-failure` prints diagnostics from failing tests, and CTest returns a
 nonzero exit code on failure.
 
@@ -152,8 +174,8 @@ cmake -S . -B build/debug -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -
 
 ### Run an executable directly
 
-The runnable targets exercise domain types, storage, and single matches. A simulation executable
-will be added when the exchange core exists. CTest is the usual way to run tests;
+The runnable targets exercise domain types, storage, and limit processing.
+A simulation executable will be added when the exchange core exists. CTest is the usual way to run tests;
 you can also run any test directly after building.
 
 In Windows PowerShell:
@@ -176,6 +198,8 @@ $LASTEXITCODE
 .\build\debug\order_book_allocation_tests.exe
 $LASTEXITCODE
 .\build\debug\order_book_matching_tests.exe
+$LASTEXITCODE
+.\build\debug\order_book_limit_tests.exe
 $LASTEXITCODE
 ```
 
@@ -200,6 +224,8 @@ echo $?
 echo $?
 ./build/debug/order_book_matching_tests
 echo $?
+./build/debug/order_book_limit_tests
+echo $?
 ```
 
 Each test is silent on success and returns exit code `0`. On failure it prints a
@@ -218,12 +244,12 @@ ctest --test-dir build/release --output-on-failure
 ### GCC checked-container tests
 
 GCC/libstdc++ can also check container and iterator operations at runtime in a
-separate build. These commands build and run only the three order-book tests:
+separate build. These commands build and run only the four order-book tests:
 
 ```powershell
 cmake -S . -B build/checked -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DCMAKE_CXX_FLAGS=-D_GLIBCXX_DEBUG
-cmake --build build/checked --target order_book_tests order_book_allocation_tests order_book_matching_tests
-ctest --test-dir build/checked --output-on-failure -R "^order_book(_allocation|_matching)?$"
+cmake --build build/checked --target order_book_tests order_book_allocation_tests order_book_matching_tests order_book_limit_tests
+ctest --test-dir build/checked --output-on-failure -R "^order_book(_allocation|_matching|_limit)?$"
 ```
 
 Keep this build separate: the flag changes standard-container layouts, so code

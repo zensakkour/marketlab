@@ -38,7 +38,104 @@ AcceptedOrder make_order(std::uint64_t id, std::uint64_t sequence, Side side,
     };
 }
 
+bool test_match_count() {
+    constexpr auto maximum = std::numeric_limits<std::int64_t>::max();
+    struct CountCase {
+        int price_offset;
+        std::int64_t remaining;
+        std::size_t expected;
+    };
+    constexpr std::array cases{
+        CountCase{-1, maximum, 0},
+        CountCase{0, 1, 1},
+        CountCase{0, 3, 1},
+        CountCase{0, 4, 2},
+        CountCase{0, 8, 2},
+        CountCase{0, maximum, 2},
+        CountCase{1, 8, 2},
+        CountCase{1, 9, 3},
+        CountCase{1, maximum, 3},
+        CountCase{2, maximum, 3},
+    };
+    for (const auto side : {Side::Buy, Side::Sell}) {
+        const auto passive_side = side == Side::Buy ? Side::Sell : Side::Buy;
+        const int direction = side == Side::Buy ? 1 : -1;
+        for (const auto& test : cases) {
+            OrderBook book{InstrumentId{1}};
+            // Insert the worse level first so map traversal, not insertion order,
+            // determines priority. The best FIFO head has already been partially filled.
+            const auto worse = make_order(30, 1, passive_side, 100 + direction, maximum);
+            const auto first = make_order(20, 2, passive_side, 100, 5);
+            const auto second = make_order(1, 3, passive_side, 100, 5);
+            const auto same_side = make_order(40, 4, side, side == Side::Buy ? 90 : 110, maximum);
+            if (book.insert_passive({worse, worse.original_quantity}) != PassiveInsertResult::Inserted ||
+                book.insert_passive({first, Quantity::from_units(3).value()}) != PassiveInsertResult::Inserted ||
+                book.insert_passive({second, second.original_quantity}) != PassiveInsertResult::Inserted ||
+                book.insert_passive({same_side, same_side.original_quantity}) != PassiveInsertResult::Inserted) {
+                return false;
+            }
+            const auto incoming = make_order(99, 5, side, 100 + direction * test.price_offset, maximum);
+            const auto remainder = Quantity::from_units(test.remaining).value();
+            const auto* bid = book.best_bid();
+            const auto* ask = book.best_ask();
+            const OrderBook& view = book;
+            const auto count = view.match_count(incoming, remainder);
+            if (!count || *count != test.expected || book.order_count() != 4 ||
+                book.best_bid() != bid || book.best_ask() != ask ||
+                !book.contains(first.order_id) || !book.contains(second.order_id) ||
+                !book.contains(worse.order_id) || !book.contains(same_side.order_id) ||
+                (side == Side::Buy ? ask : bid)->remaining_quantity.units() != 3) {
+                std::cerr << "match count or read-only book state is incorrect\n";
+                return false;
+            }
+            auto remaining = remainder;
+            std::size_t actual = 0;
+            while (remaining.units() != 0) {
+                const auto match = book.match_one(incoming, remaining, EventSequence{actual + 1});
+                if (!match) {
+                    return false;
+                }
+                if (!*match) {
+                    break;
+                }
+                ++actual;
+                remaining = (**match).incoming_remaining;
+            }
+            if (actual != test.expected) {
+                std::cerr << "match count disagrees with subsequent executions\n";
+                return false;
+            }
+        }
+
+        OrderBook empty{InstrumentId{1}};
+        auto incoming = make_order(99, 2, side, 100, 1);
+        if (empty.match_count(incoming, incoming.original_quantity) != 0) {
+            std::cerr << "empty book had a nonzero match count\n";
+            return false;
+        }
+        const auto same_side = make_order(1, 1, side, 100, 1);
+        if (empty.insert_passive({same_side, same_side.original_quantity}) != PassiveInsertResult::Inserted ||
+            empty.match_count(incoming, incoming.original_quantity) != 0) {
+            std::cerr << "match count included same-side liquidity\n";
+            return false;
+        }
+        incoming.arrival_sequence = {std::numeric_limits<std::uint64_t>::max()};
+        if (empty.match_count(incoming, incoming.original_quantity) != 0) {
+            return false;
+        }
+        const auto next = make_order(2, 2, side, 100, 1);
+        if (empty.insert_passive({next, next.original_quantity}) != PassiveInsertResult::Inserted) {
+            std::cerr << "match count advanced insertion priority\n";
+            return false;
+        }
+    }
+    return true;
+}
+
 int main() {
+    if (!test_match_count()) {
+        return 1;
+    }
     constexpr auto maximum = std::numeric_limits<std::int64_t>::max();
     struct FillCase {
         std::int64_t incoming;
@@ -71,6 +168,10 @@ int main() {
             auto incoming = make_order(99, 2, side, side == Side::Buy ? 102 : 100, test.incoming);
             if (test.self_match) {
                 incoming.participant_id = passive.participant_id;
+            }
+            if (book.match_count(incoming, incoming.original_quantity) != 1) {
+                std::cerr << "single-fill count is incorrect\n";
+                return 1;
             }
             const auto result = book.match_one(incoming, incoming.original_quantity, EventSequence{50});
             if (!result || !*result) {
@@ -117,6 +218,10 @@ int main() {
             const auto passive = make_order(1, 1, resting_side, ticks, maximum);
             const auto incoming = make_order(2, 2, side, ticks, maximum);
             if (book.insert_passive({passive, passive.original_quantity}) != PassiveInsertResult::Inserted) {
+                return 1;
+            }
+            if (book.match_count(incoming, incoming.original_quantity) != 1) {
+                std::cerr << "match count lost numeric boundaries\n";
                 return 1;
             }
             constexpr auto maximum_sequence = std::numeric_limits<std::uint64_t>::max();
@@ -176,7 +281,11 @@ int main() {
         const auto* previous_bid = guarded.best_bid();
         const auto* previous_ask = guarded.best_ask();
         const auto result = guarded.match_one(incoming, remaining, sequence);
-        return !result && result.error() == expected && guarded.order_count() == 2 &&
+        const auto count = guarded.match_count(incoming, remaining);
+        const bool count_valid = expected == MatchError::InvalidEventSequence
+            ? count && *count == 1
+            : !count && count.error() == expected;
+        return count_valid && !result && result.error() == expected && guarded.order_count() == 2 &&
                guarded.best_bid() == previous_bid && guarded.best_ask() == previous_ask &&
                guarded.contains(bid.order_id) && guarded.contains(ask.order_id) &&
                previous_bid->remaining_quantity.units() == 5 && previous_ask->remaining_quantity.units() == 5;

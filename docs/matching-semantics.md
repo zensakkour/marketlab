@@ -267,8 +267,8 @@ independently mutated source of market state.
 and FIFO queues, with a separate set of active order IDs. It is noncopyable and
 nonmovable. `insert_passive()` takes an intrinsically valid resting limit for its
 instrument, with an unused active ID and a request sequence greater than the last
-successful insertion. Sequence gaps are allowed; failed insertions reserve no ID
-and do not advance that insertion sequence. The outer exchange remains responsible
+successful passive insertion or complete limit operation. Sequence gaps are
+allowed; failed insertions reserve no ID and do not advance arrival priority. The outer exchange remains responsible
 for lifetime accepted-ID history, registration, and logical-clock validation.
 
 Passive insertion cannot leave a crossed book. `WouldCross` reports that the
@@ -284,8 +284,8 @@ than an unchecked signed aggregate that could overflow with several large orders
 `match_one()` consumes at most one eligible opposite FIFO head for an accepted
 limit order and a positive supplied remainder no greater than the original quantity.
 It validates record shape, instrument, absence of an active incoming ID, arrival
-sequence greater than the last successful insertion, and a nonzero caller-supplied
-execution sequence. Its `MatchError` values are operation diagnostics, not exchange
+sequence greater than the last successful passive insertion or complete limit
+operation, and a nonzero caller-supplied execution sequence. Its `MatchError` values are operation diagnostics, not exchange
 rejection reasons. Errors and absence of eligible liquidity leave the book unchanged.
 
 A match returns one `Execution` and both remaining quantities without modifying
@@ -297,12 +297,53 @@ retain their acceptance time, original quantity, and queue position. Full fills
 remove the active ID and FIFO head, and remove the level when empty. The operation
 allocates no memory.
 
-This primitive does not allocate sequences or advance the last insertion sequence;
-a subsequent passive remainder keeps its original incoming sequence. The future
-exchange must finish matching and rest or expire that remainder before another
-request interleaves, validate clock/registration/lifetime IDs, reserve counter/event
-capacity before mutation, and emit the prescribed ordered event stream. Market
-matching and automatic whole-request matching remain unimplemented.
+`match_count()` is a read-only preflight for a positive accepted limit remainder.
+It shares the input checks of `match_one()`, excluding execution-sequence validation
+because it does not produce an execution. It counts eligible resting orders in
+best-price/FIFO order until the supplied remainder is exhausted or no eligible
+liquidity remains. An order partially consumed by the incoming remainder counts
+as one execution. It uses stored remaining quantities, not original quantities,
+and subtracts each consumed remainder instead of accumulating an overflow-prone
+liquidity sum. The count is bounded by the number of active orders.
+
+Counting allocates no memory and changes neither records, active IDs, nor insertion
+priority. It does not reserve event capacity or assign counters. The single writer
+must leave the book unchanged between preflight and the corresponding matching;
+callers coordinating individual primitives still need to reserve output and any
+passive-remainder storage before mutation to prevent partial command application
+on failure.
+
+`match_one()` does not allocate sequences or advance book arrival priority; a
+subsequent passive remainder keeps its original incoming sequence. The single
+writer must finish that matching and resting before another request interleaves.
+
+`process_limit()` processes one complete trusted accepted limit. It validates the
+record and book-level input conditions, previews the exact match count and final
+remainder, and checks output-size arithmetic and the contiguous event-sequence
+range starting at the caller-supplied positive sequence. Zero produces
+`InvalidEventSequence`; a range that would wrap produces `EventSequenceExhausted`.
+Unrepresentable event counts or vector capacity produce `OutputCapacityExceeded`.
+These are operation/engine diagnostics, not exchange rejection reasons. Exact
+capacity ending at the maximum sequence is usable; the caller must prevent any
+further allocation from wrapping.
+
+The operation reserves the complete event vector, then stores any positive
+incoming remainder before consuming opposite liquidity. Private storage preparation
+may briefly cross the book inside the call; one writer, no callbacks, and no
+concurrent observers keep that state unobservable. Storage allocation failures
+roll back before any execution occurs. After preparation, fills and event
+construction allocate no memory and use nonthrowing value records. Matching uses
+the same resting-price/minimum-quantity primitive as `match_one()`. Return events
+follow section 10 exactly. The positive remainder retains the original limit,
+quantity, acceptance time, and arrival priority; full incoming fills do not rest.
+Successful processing advances book arrival priority, including fully filled
+orders. Errors and allocation failures leave book state and arrival priority
+unchanged; allocation exceptions propagate.
+
+The caller still establishes exchange acceptance, clock/registration/lifetime-ID
+validity, request-sequence assignment, global event-counter uniqueness, and event
+recording. `process_limit()` neither accepts raw requests nor emits rejections.
+Market matching, cancellation, and the exchange entry point remain unimplemented.
 
 ## 12. Canonical examples
 

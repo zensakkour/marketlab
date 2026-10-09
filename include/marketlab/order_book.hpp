@@ -1,5 +1,6 @@
 #pragma once
 
+#include <marketlab/events.hpp>
 #include <marketlab/execution.hpp>
 #include <marketlab/identifiers.hpp>
 #include <marketlab/orders.hpp>
@@ -12,10 +13,14 @@
 #include <deque>
 #include <expected>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <optional>
 #include <set>
 #include <stdexcept>
+#include <type_traits>
+#include <utility>
+#include <vector>
 
 namespace marketlab {
 
@@ -35,12 +40,19 @@ enum class MatchError {
     DuplicateOrderId,
     OutOfOrder,
     InvalidEventSequence,
+    EventSequenceExhausted,
+    OutputCapacityExceeded,
 };
 
 struct SingleMatch {
     Execution execution;
     Quantity incoming_remaining;
     Quantity resting_remaining;
+};
+
+struct LimitResult {
+    std::vector<ExchangeEvent> events;
+    Quantity remaining_quantity;
 };
 
 class OrderBook {
@@ -101,6 +113,167 @@ public:
             return PassiveInsertResult::WouldCross;
         }
 
+        store_passive(resting);
+        last_arrival_sequence_ = order.arrival_sequence;
+        return PassiveInsertResult::Inserted;
+    }
+
+    // Count executions needed against the current book before reserving output.
+    // The single writer must keep the book unchanged between counting and matching.
+    [[nodiscard]] std::expected<std::size_t, MatchError> match_count(
+        const AcceptedOrder& incoming, Quantity remaining) const {
+        if (const auto error = validate_match_input(incoming, remaining)) {
+            return std::unexpected{*error};
+        }
+        return preview_limit(incoming, remaining).count;
+    }
+
+    // Match one accepted limit remainder. A value contains a match or is empty
+    // when no price is eligible; an error leaves the book unchanged.
+    [[nodiscard]] std::expected<std::optional<SingleMatch>, MatchError> match_one(
+        const AcceptedOrder& incoming, Quantity remaining, EventSequence execution_sequence) {
+        if (const auto error = validate_match_input(incoming, remaining)) {
+            return std::unexpected{*error};
+        }
+        if (!is_valid(execution_sequence)) {
+            return std::unexpected{MatchError::InvalidEventSequence};
+        }
+
+        const bool incoming_buy = incoming.side == Side::Buy;
+        auto& levels = incoming_buy ? asks_ : bids_;
+        if (levels.empty()) {
+            return std::nullopt;
+        }
+        const auto level = incoming_buy ? levels.begin() : std::prev(levels.end());
+        const auto price = level->first;
+        if ((incoming_buy && price > *incoming.limit_price) ||
+            (!incoming_buy && price < *incoming.limit_price)) {
+            return std::nullopt;
+        }
+        return match_at(incoming, remaining, execution_sequence, levels, level);
+    }
+
+    // Process a trusted accepted limit; exchange registration, clock, and lifetime
+    // ID checks belong to the caller. All potentially failing work precedes fills.
+    [[nodiscard]] std::expected<LimitResult, MatchError> process_limit(
+        const AcceptedOrder& incoming, EventSequence first_event_sequence) {
+        if (const auto error = validate_match_input(incoming, incoming.original_quantity)) {
+            return std::unexpected{*error};
+        }
+        if (!is_valid(first_event_sequence)) {
+            return std::unexpected{MatchError::InvalidEventSequence};
+        }
+        const auto preview = preview_limit(incoming, incoming.original_quantity);
+        const std::size_t final_events = preview.remaining.units() == 0 ? 1 : 2;
+        if (preview.count > (std::numeric_limits<std::size_t>::max() - final_events) / 3) {
+            return std::unexpected{MatchError::OutputCapacityExceeded};
+        }
+        const auto event_count = final_events + 3 * preview.count;
+        if (std::cmp_greater(event_count - 1,
+                std::numeric_limits<std::uint64_t>::max() - first_event_sequence.value)) {
+            return std::unexpected{MatchError::EventSequenceExhausted};
+        }
+        LimitResult result{{}, preview.remaining};
+        if (event_count > result.events.max_size()) {
+            return std::unexpected{MatchError::OutputCapacityExceeded};
+        }
+        result.events.reserve(event_count);
+        const auto header = [&] {
+            return EventHeader{incoming.accepted_at,
+                EventSequence{first_event_sequence.value + result.events.size()},
+                incoming.arrival_sequence, instrument_id_};
+        };
+        result.events.emplace_back(OrderAccepted{header(), incoming});
+
+        // The positive remainder can allocate. Store it before consuming opposite
+        // liquidity; no observer or callback can see this temporary crossed state.
+        if (preview.remaining.units() != 0) {
+            store_passive({incoming, preview.remaining});
+        }
+        static_assert(std::is_nothrow_copy_constructible_v<ExchangeEvent>);
+        static_assert(std::is_nothrow_move_constructible_v<ExchangeEvent>);
+        static_assert(std::is_nothrow_constructible_v<std::expected<LimitResult, MatchError>, LimitResult&&>);
+        auto remaining = incoming.original_quantity;
+        auto& levels = incoming.side == Side::Buy ? asks_ : bids_;
+        for (std::size_t index = 0; index < preview.count; ++index) {
+            const auto level = incoming.side == Side::Buy ? levels.begin() : std::prev(levels.end());
+            const auto match = match_at(incoming, remaining, header().event_sequence, levels, level);
+            result.events.emplace_back(match.execution);
+            const auto resting_owner = incoming.side == Side::Buy
+                ? match.execution.seller_id : match.execution.buyer_id;
+            if (match.resting_remaining.units() == 0) {
+                result.events.emplace_back(OrderFilled{header(), match.execution.resting_order_id,
+                    resting_owner, match.resting_remaining});
+            } else {
+                result.events.emplace_back(OrderPartiallyFilled{header(), match.execution.resting_order_id,
+                    resting_owner, match.resting_remaining});
+            }
+            remaining = match.incoming_remaining;
+            if (remaining.units() == 0) {
+                result.events.emplace_back(OrderFilled{header(), incoming.order_id,
+                    incoming.participant_id, remaining});
+            } else {
+                result.events.emplace_back(OrderPartiallyFilled{header(), incoming.order_id,
+                    incoming.participant_id, remaining});
+            }
+        }
+        if (preview.remaining.units() != 0) {
+            result.events.emplace_back(OrderRested{header(), incoming.order_id,
+                incoming.participant_id, *incoming.limit_price, preview.remaining});
+        }
+        last_arrival_sequence_ = incoming.arrival_sequence;
+        return result;
+    }
+
+private:
+    using PriceLevels = std::map<Price, std::deque<RestingOrder>>;
+
+    struct LimitPreview {
+        std::size_t count;
+        Quantity remaining;
+    };
+
+    [[nodiscard]] LimitPreview preview_limit(const AcceptedOrder& incoming, Quantity remaining) const {
+        const bool incoming_buy = incoming.side == Side::Buy;
+        const auto& levels = incoming_buy ? asks_ : bids_;
+        std::size_t count = 0;
+        const auto count_level = [&](const auto& level) {
+            if ((incoming_buy && level.first > *incoming.limit_price) ||
+                (!incoming_buy && level.first < *incoming.limit_price)) {
+                return false;
+            }
+            for (const auto& resting : level.second) {
+                ++count;
+                // Subtract fills individually; total available liquidity may overflow.
+                const auto quantity = std::min(remaining, resting.remaining_quantity);
+                remaining = remaining.subtract(quantity).value();
+                if (remaining.units() == 0) {
+                    return false;
+                }
+            }
+            return true;
+        };
+        if (incoming_buy) {
+            for (const auto& level : levels) {
+                if (!count_level(level)) {
+                    break;
+                }
+            }
+        } else {
+            for (auto level = levels.rbegin(); level != levels.rend(); ++level) {
+                if (!count_level(*level)) {
+                    break;
+                }
+            }
+        }
+        return {count, remaining};
+    }
+
+    // Inputs are validated by the public operation. Insertion retains its strong
+    // exception guarantee, including when used to prepare a crossing remainder.
+    void store_passive(const RestingOrder& resting) {
+        const auto& order = resting.order;
+        const auto price = *order.limit_price;
         auto& levels = order.side == Side::Buy ? bids_ : asks_;
         const auto id_position = order_ids_.insert(order.order_id).first;
         try {
@@ -118,44 +291,12 @@ public:
             order_ids_.erase(id_position);
             throw;
         }
-        last_arrival_sequence_ = order.arrival_sequence;
-        return PassiveInsertResult::Inserted;
     }
 
-    // Match one accepted limit remainder. A value contains a match or is empty
-    // when no price is eligible; an error leaves the book unchanged.
-    [[nodiscard]] std::expected<std::optional<SingleMatch>, MatchError> match_one(
-        const AcceptedOrder& incoming, Quantity remaining, EventSequence execution_sequence) {
-        if (!is_valid(incoming) || incoming.type != OrderType::Limit) {
-            return std::unexpected{MatchError::InvalidOrder};
-        }
-        if (!is_valid_order_quantity(remaining) || remaining > incoming.original_quantity) {
-            return std::unexpected{MatchError::InvalidRemainingQuantity};
-        }
-        if (incoming.instrument_id != instrument_id_) {
-            return std::unexpected{MatchError::WrongInstrument};
-        }
-        if (contains(incoming.order_id)) {
-            return std::unexpected{MatchError::DuplicateOrderId};
-        }
-        if (incoming.arrival_sequence <= last_arrival_sequence_) {
-            return std::unexpected{MatchError::OutOfOrder};
-        }
-        if (!is_valid(execution_sequence)) {
-            return std::unexpected{MatchError::InvalidEventSequence};
-        }
-
+    // The caller has established an eligible FIFO head and sufficient event space.
+    [[nodiscard]] SingleMatch match_at(const AcceptedOrder& incoming, Quantity remaining,
+        EventSequence execution_sequence, PriceLevels& levels, PriceLevels::iterator level) {
         const bool incoming_buy = incoming.side == Side::Buy;
-        auto& levels = incoming_buy ? asks_ : bids_;
-        if (levels.empty()) {
-            return std::nullopt;
-        }
-        const auto level = incoming_buy ? levels.begin() : std::prev(levels.end());
-        const auto price = level->first;
-        if ((incoming_buy && price > *incoming.limit_price) ||
-            (!incoming_buy && price < *incoming.limit_price)) {
-            return std::nullopt;
-        }
         auto& resting = level->second.front();
         const auto quantity = std::min(remaining, resting.remaining_quantity);
         // The minimum bounds both subtractions before any state changes.
@@ -172,7 +313,7 @@ public:
                 .aggressive_side = incoming.side,
                 .buyer_id = incoming_buy ? incoming.participant_id : resting.order.participant_id,
                 .seller_id = incoming_buy ? resting.order.participant_id : incoming.participant_id,
-                .price = price,
+                .price = level->first,
                 .quantity = quantity,
             },
             incoming_remaining,
@@ -188,11 +329,28 @@ public:
         } else {
             resting.remaining_quantity = resting_remaining;
         }
-        return std::optional{match};
+        return match;
     }
 
-private:
-    using PriceLevels = std::map<Price, std::deque<RestingOrder>>;
+    [[nodiscard]] std::optional<MatchError> validate_match_input(
+        const AcceptedOrder& incoming, Quantity remaining) const {
+        if (!is_valid(incoming) || incoming.type != OrderType::Limit) {
+            return MatchError::InvalidOrder;
+        }
+        if (!is_valid_order_quantity(remaining) || remaining > incoming.original_quantity) {
+            return MatchError::InvalidRemainingQuantity;
+        }
+        if (incoming.instrument_id != instrument_id_) {
+            return MatchError::WrongInstrument;
+        }
+        if (contains(incoming.order_id)) {
+            return MatchError::DuplicateOrderId;
+        }
+        if (incoming.arrival_sequence <= last_arrival_sequence_) {
+            return MatchError::OutOfOrder;
+        }
+        return std::nullopt;
+    }
 
     InstrumentId instrument_id_;
     PriceLevels bids_;
