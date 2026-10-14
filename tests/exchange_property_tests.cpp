@@ -1,4 +1,5 @@
 #include <marketlab/exchange.hpp>
+#include <marketlab/market_data.hpp>
 
 #include <algorithm>
 #include <array>
@@ -261,8 +262,16 @@ void check_book(const Exchange& exchange, const Ledger& ledger, std::uint64_t se
         require(resting && same_acceptance(resting->order, tracked) && resting->remaining_quantity.units() == tracked.remaining,
             "active record differs from execution ledger");
     }
+    const auto snapshot = marketlab::best_prices(exchange);
+    require(snapshot.instrument_id.value == 1 && snapshot.timestamp.nanoseconds == ledger.time &&
+        snapshot.last_request_sequence.value == sequence && snapshot.last_event_sequence.value == ledger.events,
+        "best-price snapshot metadata differs from ledger");
     for (const auto side : {Side::Buy, Side::Sell}) {
         const auto expected = ledger.best(side);
+        const auto& price = side == Side::Buy ? snapshot.bid : snapshot.ask;
+        require(expected == ledger.active.end() ? !price :
+            price && price->ticks() == *expected->second.request.limit_price_ticks,
+            "best-price snapshot differs from ledger");
         const auto* head = side == Side::Buy ? book.best_bid() : book.best_ask();
         require(expected == ledger.active.end() ? head == nullptr : head && head->order.order_id == expected->first,
             "best/FIFO head differs from ledger");

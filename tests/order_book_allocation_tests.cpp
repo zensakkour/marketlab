@@ -1,4 +1,5 @@
 #include <marketlab/exchange.hpp>
+#include <marketlab/market_data.hpp>
 #include <marketlab/order_book.hpp>
 
 #include <array>
@@ -6,6 +7,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <new>
 #include <optional>
 #include <variant>
@@ -45,6 +47,32 @@ void operator delete[](void* allocation) noexcept {
 
 void operator delete[](void* allocation, std::size_t) noexcept {
     ::operator delete(allocation);
+}
+
+bool test_best_price_allocations() {
+    using namespace marketlab;
+    const std::array participants{ParticipantId{1}};
+    Exchange exchange{Instrument{{1}, "TEST", TickSize::from_decimal(1, 0).value()}, participants};
+    allocations_before_failure = 0;
+    const auto empty = best_prices(exchange);
+    allocations_before_failure = -1;
+    if (empty.bid || empty.ask || empty.timestamp.nanoseconds != 0 || empty.last_request_sequence.value != 0 ||
+        empty.last_event_sequence.value != 0) return false;
+    constexpr auto maximum = std::numeric_limits<std::int64_t>::max();
+    const OrderRequest bid{{10}, {1}, {1}, {1}, Side::Buy, OrderType::Limit, maximum, 1};
+    const OrderRequest ask{{10}, {1}, {1}, {2}, Side::Sell, OrderType::Limit, maximum, maximum};
+    if (!exchange.process_order(bid) || !exchange.process_order(ask)) return false;
+    const auto* best_bid = exchange.book().best_bid();
+    const auto* best_ask = exchange.book().best_ask();
+    allocations_before_failure = 0;
+    const auto snapshot = best_prices(exchange);
+    allocations_before_failure = -1;
+    return snapshot.bid && snapshot.bid->ticks() == 1 && snapshot.ask && snapshot.ask->ticks() == maximum &&
+        snapshot.instrument_id.value == 1 && snapshot.timestamp.nanoseconds == 10 &&
+        snapshot.last_request_sequence.value == 2 && snapshot.last_event_sequence.value == 4 &&
+        exchange.book().best_bid() == best_bid && exchange.book().best_ask() == best_ask &&
+        exchange.book().order_count() == 2 && best_bid->remaining_quantity.units() == maximum &&
+        best_ask->remaining_quantity.units() == maximum && exchange.book().check_invariants();
 }
 
 bool test_invariant_allocations() {
@@ -492,6 +520,10 @@ bool test_cancel_allocations() {
 }
 
 int main() {
+    if (!test_best_price_allocations()) {
+        std::cerr << "best-price snapshot allocated or changed exchange state\n";
+        return 1;
+    }
     if (!test_invariant_allocations()) {
         std::cerr << "invariant diagnostic allocation failure changed book state\n";
         return 1;

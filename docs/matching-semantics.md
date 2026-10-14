@@ -306,6 +306,13 @@ Market data is derived from exchange state. Quotes and depth reflect the order
 book; trade information reflects executions. Market data must not become an
 independently mutated source of market state.
 
+The first implemented projection, `best_prices(exchange)`, copies the configured
+instrument, committed clock/counters and optional highest-bid/lowest-ask prices.
+It reads completed exchange state without allocation, events or mutation. Returned
+values retain their own prices after source records are removed. Pending arrivals
+remain outside the snapshot until processed. Field definitions and current scope
+are in [market-data.md](market-data.md).
+
 ### Current book primitives
 
 `OrderBook` owns resting records for one instrument using ordered price levels
@@ -421,8 +428,9 @@ unchanged; allocation exceptions propagate.
 The caller establishes exchange acceptance, clock/registration/lifetime-ID
 validity, request-sequence assignment, and global event-counter uniqueness.
 `OrderBook::process_order()` neither accepts raw requests nor emits rejections.
-`Exchange::process_order()` now provides that boundary for new orders; event
-recording remains unimplemented.
+`Exchange::process_order()` provides that boundary for new orders; returned events
+can be recorded using the exact text writer described in
+[event-record-format.md](event-record-format.md).
 
 `cancel()` takes a `CancelRequest` and caller-assigned request/event sequences,
 returning `std::expected<OrderCancelled, CancelError>`. It checks the instrument

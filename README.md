@@ -43,7 +43,7 @@ quantities with checked subtraction, distinct order/participant/instrument IDs,
 order sides/types, logical timestamps, instrument tick configuration,
 order/cancel requests, accepted/resting orders, executions, exchange events,
 exact text event recording, scheduled request records, an owning arrival queue
-and simulation delivery,
+and simulation delivery, owned best-price snapshots,
 passive order-book storage, single-match limit fills,
 read-only limit match counting, complete accepted-order processing for limits and
 markets, active-order lookup, owned-order cancellation, and raw order/cancel
@@ -127,6 +127,14 @@ expose only const views, preserving the single writer. Drive it by calling `step
 until empty, stopping on an engine error. No wall-clock sleeps, callbacks or
 participant accounting are introduced. Delayed reports and latency remain later
 components.
+
+`best_prices(exchange)` from `<marketlab/market_data.hpp>` returns an owned
+`BestPrices` snapshot: configured instrument, committed time/request/event
+counters, and optional exact bid/ask prices. Reads allocate nothing and emit no
+events. The copied prices remain valid after later fills/cancels; call again for
+current state. Query only at completed request boundaries under the single writer.
+Pending simulation arrivals are excluded. See [market data](docs/market-data.md)
+for field definitions and the current price-only scope.
 
 The matching contract is in [docs/matching-semantics.md](docs/matching-semantics.md).
 `OrderBook` owns passive resting limits for one nonzero instrument ID. It stores
@@ -258,13 +266,19 @@ build files; building compiles the test executables; CTest runs them. Tests are
 enabled explicitly, and compiler warnings are treated as errors.
 
 A successful test run ends with `100% tests passed, 0 tests failed`.
-Currently there are twenty registered tests: `price`, `domain`, `requests`, `orders`,
-`events`, `event_record`, `simulation`, `simulation_queue`, `simulation_queue_allocation`,
+Currently there are twenty-one registered tests: `price`, `domain`, `requests`, `orders`,
+`events`, `event_record`, `market_data`, `simulation`, `simulation_queue`,
+`simulation_queue_allocation`,
 `simulation_delivery`, `order_book`, `order_book_allocation`, `order_book_matching`,
 `order_book_limit`, `order_book_cancel`, `order_book_market`, `order_book_invariant`,
 `exchange`, `exchange_scenario`, and `exchange_property`.
 `--output-on-failure` prints diagnostics from failing tests, and CTest returns a
 nonzero exit code on failure.
+
+`market_data` verifies best prices and metadata after book transitions, retained
+snapshots, numerical boundaries, rejections and scheduled delivery. Generated
+workloads compare snapshots against the independent execution ledger; allocation
+tests verify projection reads with allocation failure armed.
 
 `event_record` checks all nine exact output lines, raw rejection fields, integer
 limits, locale/stream-setting independence and output errors. Recording the
@@ -343,6 +357,8 @@ $LASTEXITCODE
 $LASTEXITCODE
 .\build\debug\event_record_tests.exe
 $LASTEXITCODE
+.\build\debug\market_data_tests.exe
+$LASTEXITCODE
 .\build\debug\simulation_tests.exe
 $LASTEXITCODE
 .\build\debug\simulation_queue_tests.exe
@@ -387,6 +403,8 @@ echo $?
 ./build/debug/events_tests
 echo $?
 ./build/debug/event_record_tests
+echo $?
+./build/debug/market_data_tests
 echo $?
 ./build/debug/simulation_tests
 echo $?
@@ -499,13 +517,13 @@ These generated workloads validate correctness.
 ### GCC checked-container tests
 
 GCC/libstdc++ can also check container and iterator operations at runtime in a
-separate build. These commands build and run fifteen tests covering recording,
-simulation, books and the exchange:
+separate build. These commands build and run sixteen tests covering market data,
+recording, simulation, books and the exchange:
 
 ```powershell
 cmake -S . -B build/checked -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DCMAKE_CXX_FLAGS=-D_GLIBCXX_DEBUG
-cmake --build build/checked --target event_record_tests simulation_tests simulation_queue_tests simulation_queue_allocation_tests simulation_delivery_tests order_book_tests order_book_allocation_tests order_book_matching_tests order_book_limit_tests order_book_cancel_tests order_book_market_tests order_book_invariant_tests exchange_tests exchange_scenario_tests exchange_property_tests
-ctest --test-dir build/checked --output-on-failure -R "^(event_record|simulation(_queue(_allocation)?|_delivery)?|order_book(_allocation|_matching|_limit|_cancel|_market|_invariant)?|exchange(_scenario|_property)?)$"
+cmake --build build/checked --target event_record_tests market_data_tests simulation_tests simulation_queue_tests simulation_queue_allocation_tests simulation_delivery_tests order_book_tests order_book_allocation_tests order_book_matching_tests order_book_limit_tests order_book_cancel_tests order_book_market_tests order_book_invariant_tests exchange_tests exchange_scenario_tests exchange_property_tests
+ctest --test-dir build/checked --output-on-failure -R "^(event_record|market_data|simulation(_queue(_allocation)?|_delivery)?|order_book(_allocation|_matching|_limit|_cancel|_market|_invariant)?|exchange(_scenario|_property)?)$"
 ```
 
 Keep this build separate: the flag changes standard-container layouts, so code
