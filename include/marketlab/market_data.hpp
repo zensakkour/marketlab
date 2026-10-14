@@ -2,9 +2,16 @@
 
 #include <marketlab/exchange.hpp>
 
+#include <cstdint>
 #include <optional>
 
 namespace marketlab {
+
+struct MidPrice {
+    std::int64_t whole_ticks;
+    bool half_tick;
+    constexpr bool operator==(const MidPrice&) const noexcept = default;
+};
 
 struct BestPrices {
     InstrumentId instrument_id;
@@ -13,6 +20,22 @@ struct BestPrices {
     EventSequence last_event_sequence;
     std::optional<Price> bid;
     std::optional<Price> ask;
+
+    [[nodiscard]] constexpr std::optional<std::int64_t> spread_ticks() const noexcept {
+        if (!bid || !ask) {
+            return std::nullopt;
+        }
+        return ask->ticks() - bid->ticks();
+    }
+
+    [[nodiscard]] constexpr std::optional<MidPrice> mid_price() const noexcept {
+        if (!bid || !ask) {
+            return std::nullopt;
+        }
+        // Two positive signed 64-bit prices sum within UINT64_MAX; avoid a signed sum.
+        const auto sum = static_cast<std::uint64_t>(bid->ticks()) + static_cast<std::uint64_t>(ask->ticks());
+        return MidPrice{static_cast<std::int64_t>(sum / 2), sum % 2 != 0};
+    }
 };
 
 // Value snapshot at a completed request boundary, under the book's single writer.

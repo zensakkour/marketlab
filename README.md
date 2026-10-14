@@ -43,7 +43,7 @@ quantities with checked subtraction, distinct order/participant/instrument IDs,
 order sides/types, logical timestamps, instrument tick configuration,
 order/cancel requests, accepted/resting orders, executions, exchange events,
 exact text event recording, scheduled request records, an owning arrival queue
-and simulation delivery, owned best-price snapshots,
+and simulation delivery, owned best-price snapshots with exact spread/midpoint,
 passive order-book storage, single-match limit fills,
 read-only limit match counting, complete accepted-order processing for limits and
 markets, active-order lookup, owned-order cancellation, and raw order/cancel
@@ -133,8 +133,11 @@ components.
 counters, and optional exact bid/ask prices. Reads allocate nothing and emit no
 events. The copied prices remain valid after later fills/cancels; call again for
 current state. Query only at completed request boundaries under the single writer.
-Pending simulation arrivals are excluded. See [market data](docs/market-data.md)
-for field definitions and the current price-only scope.
+Pending simulation arrivals are excluded. `spread_ticks()` returns ask minus bid;
+`mid_price()` returns exact `MidPrice{whole_ticks, half_tick}`. Both are absent
+when a side is missing, and neither allocates or rounds. For bid 100 / ask 101,
+spread is 1 and mid is `{100, true}` (100.5 ticks). Arithmetic stays exact near
+INT64_MAX. See [market data](docs/market-data.md) for fields and current scope.
 
 The matching contract is in [docs/matching-semantics.md](docs/matching-semantics.md).
 `OrderBook` owns passive resting limits for one nonzero instrument ID. It stores
@@ -276,8 +279,8 @@ Currently there are twenty-one registered tests: `price`, `domain`, `requests`, 
 nonzero exit code on failure.
 
 `market_data` verifies best prices and metadata after book transitions, retained
-snapshots, numerical boundaries, rejections and scheduled delivery. Generated
-workloads compare snapshots against the independent execution ledger; allocation
+snapshots, exact spread/midpoint arithmetic, numerical boundaries, rejections and
+scheduled delivery. Generated workloads compare snapshots against the independent execution ledger; allocation
 tests verify projection reads with allocation failure armed.
 
 `event_record` checks all nine exact output lines, raw rejection fields, integer

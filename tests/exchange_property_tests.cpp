@@ -276,6 +276,17 @@ void check_book(const Exchange& exchange, const Ledger& ledger, std::uint64_t se
         require(expected == ledger.active.end() ? head == nullptr : head && head->order.order_id == expected->first,
             "best/FIFO head differs from ledger");
     }
+    const auto bid = ledger.best(Side::Buy);
+    const auto ask = ledger.best(Side::Sell);
+    if (bid != ledger.active.end() && ask != ledger.active.end()) {
+        const auto bid_ticks = *bid->second.request.limit_price_ticks;
+        const auto distance = *ask->second.request.limit_price_ticks - bid_ticks;
+        require(snapshot.spread_ticks() == distance &&
+            snapshot.mid_price() == marketlab::MidPrice{bid_ticks + distance / 2, distance % 2 != 0},
+            "spread or midpoint differs from independent ledger");
+    } else {
+        require(!snapshot.spread_ticks() && !snapshot.mid_price(), "one-sided ledger has a spread or midpoint");
+    }
     require(exchange.current_time().nanoseconds == ledger.time && exchange.last_request_sequence().value == sequence &&
         exchange.last_event_sequence().value == ledger.events, "committed clock or counters differ");
 }

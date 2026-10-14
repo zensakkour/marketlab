@@ -18,6 +18,14 @@
 using namespace marketlab;
 
 static_assert(noexcept(best_prices(std::declval<const Exchange&>())));
+static_assert(!std::is_convertible_v<MidPrice, Price>);
+static_assert(noexcept(std::declval<const BestPrices&>().spread_ticks()));
+static_assert(noexcept(std::declval<const BestPrices&>().mid_price()));
+constexpr BestPrices half_tick{{1}, {0}, {0}, {0}, Price::from_ticks(100), Price::from_ticks(101)};
+static_assert(half_tick.spread_ticks() == 1);
+static_assert(half_tick.mid_price() == MidPrice{100, true});
+constexpr BestPrices missing_side{{1}, {0}, {0}, {0}, Price::from_ticks(100), std::nullopt};
+static_assert(!missing_side.spread_ticks() && !missing_side.mid_price());
 
 void require(bool condition, std::string_view message) {
     if (!condition) throw std::runtime_error{std::string{message}};
@@ -37,6 +45,14 @@ void check_prices(const Exchange& exchange, std::optional<std::int64_t> bid, std
         snapshot.timestamp == exchange.current_time() && snapshot.last_request_sequence == exchange.last_request_sequence() &&
         snapshot.last_event_sequence == exchange.last_event_sequence(), "quote snapshot metadata differs");
     require(value(snapshot.bid) == bid && value(snapshot.ask) == ask, "quote snapshot prices differ");
+    if (bid && ask) {
+        const auto distance = *ask - *bid;
+        require(snapshot.spread_ticks() == distance &&
+            snapshot.mid_price() == MidPrice{*bid + distance / 2, distance % 2 != 0},
+            "quote spread or exact midpoint differs");
+    } else {
+        require(!snapshot.spread_ticks() && !snapshot.mid_price(), "one-sided quote has a spread or midpoint");
+    }
     require(exchange.book().check_invariants(), "quote read changed book invariants");
 }
 
@@ -140,6 +156,40 @@ void test_rejections_and_boundaries() {
     require(ask_only.ask->ticks() == maximum && !ask_only.bid, "one-sided maximum price lost");
 }
 
+void test_exact_midpoints() {
+    struct Case {
+        std::int64_t bid;
+        std::int64_t ask;
+        std::int64_t spread;
+        MidPrice mid;
+    };
+    constexpr auto maximum = std::numeric_limits<std::int64_t>::max();
+    const std::array cases{
+        Case{1, 2, 1, {1, true}},
+        Case{1, 3, 2, {2, false}},
+        Case{100, 101, 1, {100, true}},
+        Case{100, 102, 2, {101, false}},
+        Case{1, maximum, maximum - 1, {maximum / 2 + 1, false}},
+        Case{2, maximum, maximum - 2, {maximum / 2 + 1, true}},
+        Case{maximum - 2, maximum, 2, {maximum - 1, false}},
+        Case{maximum - 1, maximum, 1, {maximum - 1, true}},
+    };
+    const std::array participants{ParticipantId{1}};
+    for (const auto& test : cases) {
+        Exchange exchange{Instrument{{1}, "TEST", TickSize::from_decimal(1, 0).value()}, participants};
+        require(exchange.process_order(limit(1, Side::Buy, test.bid, 1)).has_value(), "midpoint bid failed");
+        require(exchange.process_order(limit(2, Side::Sell, test.ask, 1)).has_value(), "midpoint ask failed");
+        const auto snapshot = best_prices(exchange);
+        require(snapshot.spread_ticks() == test.spread && snapshot.mid_price() == test.mid,
+            "midpoint boundary or half-tick precision differs");
+        require(exchange.process_cancel(CancelRequest{{0}, {1}, {1}, {2}}).has_value(), "midpoint ask removal failed");
+        const auto one_sided = best_prices(exchange);
+        require(!one_sided.spread_ticks() && !one_sided.mid_price(), "midpoint survived removal of one side");
+        require(snapshot.spread_ticks() == test.spread && snapshot.mid_price() == test.mid,
+            "derived values changed in a retained snapshot");
+    }
+}
+
 void test_simulation_read_boundaries() {
     const std::array participants{ParticipantId{1}};
     Simulation simulation{Instrument{{1}, "TEST", TickSize::from_decimal(1, 0).value()}, participants};
@@ -172,6 +222,7 @@ int main() {
         test_price_transitions();
         test_bid_price_transitions();
         test_rejections_and_boundaries();
+        test_exact_midpoints();
         test_simulation_read_boundaries();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

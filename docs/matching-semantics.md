@@ -313,6 +313,12 @@ values retain their own prices after source records are removed. Pending arrival
 remain outside the snapshot until processed. Field definitions and current scope
 are in [market-data.md](market-data.md).
 
+The snapshot derives `spread_ticks()` as ask minus bid only when both prices
+exist. `mid_price()` preserves the exact average as whole ticks plus a half-tick
+flag, without rounding or floating point. Both are absent for an empty side.
+Unsigned price summation prevents signed overflow at the price maximum; the
+result remains an observation and does not change permitted order-price ticks.
+
 ### Current book primitives
 
 `OrderBook` owns resting records for one instrument using ordered price levels
