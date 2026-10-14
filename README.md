@@ -42,7 +42,8 @@ The current C++23 components are exact integer-tick prices, nonnegative
 quantities with checked subtraction, distinct order/participant/instrument IDs,
 order sides/types, logical timestamps, instrument tick configuration,
 order/cancel requests, accepted/resting orders, executions, exchange events,
-scheduled request records, an owning arrival queue and simulation delivery,
+exact text event recording, scheduled request records, an owning arrival queue
+and simulation delivery,
 passive order-book storage, single-match limit fills,
 read-only limit match counting, complete accepted-order processing for limits and
 markets, active-order lookup, owned-order cancellation, and raw order/cancel
@@ -229,7 +230,7 @@ fills and state commitment. `book()` exposes only a borrowed const view; reacqui
 resting-order pointers after processing. `current_time()`, `last_request_sequence()`,
 and `last_event_sequence()` expose committed state (both sequences start at zero
 before the first request). One writer processes calls without callbacks.
-Recording, participant behavior, modeled latency and the decimal price adapter
+Participant behavior, modeled latency and the decimal price adapter
 remain future work.
 
 ### Requirements
@@ -257,13 +258,18 @@ build files; building compiles the test executables; CTest runs them. Tests are
 enabled explicitly, and compiler warnings are treated as errors.
 
 A successful test run ends with `100% tests passed, 0 tests failed`.
-Currently there are nineteen registered tests: `price`, `domain`, `requests`, `orders`,
-`events`, `simulation`, `simulation_queue`, `simulation_queue_allocation`,
+Currently there are twenty registered tests: `price`, `domain`, `requests`, `orders`,
+`events`, `event_record`, `simulation`, `simulation_queue`, `simulation_queue_allocation`,
 `simulation_delivery`, `order_book`, `order_book_allocation`, `order_book_matching`,
 `order_book_limit`, `order_book_cancel`, `order_book_market`, `order_book_invariant`,
 `exchange`, `exchange_scenario`, and `exchange_property`.
 `--output-on-failure` prints diagnostics from failing tests, and CTest returns a
 nonzero exit code on failure.
+
+`event_record` checks all nine exact output lines, raw rejection fields, integer
+limits, locale/stream-setting independence and output errors. Recording the
+scripted timeline leaves its event sequence and final book identical to the
+unrecorded run.
 
 `simulation_queue` checks time/insertion ordering, zero/maximum timestamps,
 sequence exhaustion arithmetic, insertion after removal, mixed request kinds and
@@ -335,6 +341,8 @@ $LASTEXITCODE
 $LASTEXITCODE
 .\build\debug\events_tests.exe
 $LASTEXITCODE
+.\build\debug\event_record_tests.exe
+$LASTEXITCODE
 .\build\debug\simulation_tests.exe
 $LASTEXITCODE
 .\build\debug\simulation_queue_tests.exe
@@ -377,6 +385,8 @@ echo $?
 ./build/debug/orders_tests
 echo $?
 ./build/debug/events_tests
+echo $?
+./build/debug/event_record_tests
 echo $?
 ./build/debug/simulation_tests
 echo $?
@@ -421,6 +431,40 @@ cmake --build build/release
 ctest --test-dir build/release --output-on-failure
 ```
 
+### Record the scripted timeline
+
+The event writer is `write_event_record(output, event)` from
+`<marketlab/event_record.hpp>`. Call it for returned events in their existing
+order, then check the output stream. It writes exact decimal fields for all nine
+types; malformed rejected requests retain their original numbers. The
+[v1 format](docs/event-record-format.md) documents every field and I/O behavior.
+
+The scripted integration executable can display its twelve validated events:
+
+```powershell
+cmake --build build/debug --target simulation_delivery_tests
+.\build\debug\simulation_delivery_tests.exe --record-script
+$LASTEXITCODE
+```
+
+To save them under the ignored build directory in PowerShell:
+
+```powershell
+.\build\debug\simulation_delivery_tests.exe --record-script | Set-Content -Encoding ascii -ErrorAction Stop .\build\debug\script-events.log
+$LASTEXITCODE
+```
+
+In a Unix shell:
+
+```sh
+./build/debug/simulation_delivery_tests --record-script > build/debug/script-events.log
+echo $?
+```
+
+Exit code 0 means the checks and output succeeded; unknown arguments return 2.
+Without `--record-script`, the executable remains silent on success. Its tests
+compare recording enabled/disabled logical results and exact output lines.
+
 ### Reproduce a generated workload
 
 Run one seed with a chosen request count (decimal seed 0 through UINT64_MAX;
@@ -455,13 +499,13 @@ These generated workloads validate correctness.
 ### GCC checked-container tests
 
 GCC/libstdc++ can also check container and iterator operations at runtime in a
-separate build. These commands build and run the fourteen simulation/book/exchange
-tests:
+separate build. These commands build and run fifteen tests covering recording,
+simulation, books and the exchange:
 
 ```powershell
 cmake -S . -B build/checked -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DCMAKE_CXX_FLAGS=-D_GLIBCXX_DEBUG
-cmake --build build/checked --target simulation_tests simulation_queue_tests simulation_queue_allocation_tests simulation_delivery_tests order_book_tests order_book_allocation_tests order_book_matching_tests order_book_limit_tests order_book_cancel_tests order_book_market_tests order_book_invariant_tests exchange_tests exchange_scenario_tests exchange_property_tests
-ctest --test-dir build/checked --output-on-failure -R "^(simulation(_queue(_allocation)?|_delivery)?|order_book(_allocation|_matching|_limit|_cancel|_market|_invariant)?|exchange(_scenario|_property)?)$"
+cmake --build build/checked --target event_record_tests simulation_tests simulation_queue_tests simulation_queue_allocation_tests simulation_delivery_tests order_book_tests order_book_allocation_tests order_book_matching_tests order_book_limit_tests order_book_cancel_tests order_book_market_tests order_book_invariant_tests exchange_tests exchange_scenario_tests exchange_property_tests
+ctest --test-dir build/checked --output-on-failure -R "^(event_record|simulation(_queue(_allocation)?|_delivery)?|order_book(_allocation|_matching|_limit|_cancel|_market|_invariant)?|exchange(_scenario|_property)?)$"
 ```
 
 Keep this build separate: the flag changes standard-container layouts, so code

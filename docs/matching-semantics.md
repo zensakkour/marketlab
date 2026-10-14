@@ -481,8 +481,9 @@ must stop the run on capacity failure. Allocation exceptions propagate. A book
 input diagnostic after validated exchange acceptance indicates an internal
 invariant failure and throws `std::logic_error` without committing the request.
 `current_time()`, `last_request_sequence()`, and `last_event_sequence()` report
-committed state. `Simulation` owns scheduled request delivery; recording remains
-future work.
+committed state. `Simulation` owns scheduled request delivery. Exact text output
+of returned events is documented in [event-record-format.md](event-record-format.md);
+it preserves event order and does not mutate exchange or simulation state.
 
 `Exchange::process_cancel(CancelRequest)` returns the same expected vector type,
 containing exactly one `OrderCancelled` or `CancelRejected` event. It shares

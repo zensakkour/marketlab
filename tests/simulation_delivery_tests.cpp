@@ -1,3 +1,4 @@
+#include <marketlab/event_record.hpp>
 #include <marketlab/simulation.hpp>
 
 #include <algorithm>
@@ -7,6 +8,7 @@
 #include <exception>
 #include <iostream>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -123,9 +125,36 @@ AcceptedOrder accepted_order(const OrderRequest& request, std::uint64_t sequence
 struct ScriptResult {
     std::vector<ExchangeEvent> events;
     RestingOrder survivor;
+    std::string recording;
 };
 
-ScriptResult run_script() {
+constexpr std::string_view expected_script_record =
+    "v=1 type=OrderAccepted time_ns=1 event_seq=1 request_seq=1 instrument_id=1 order_id=900 participant_id=1 "
+    "side=1 order_type=1 original_units=5 limit_ticks=100\n"
+    "v=1 type=OrderRested time_ns=1 event_seq=2 request_seq=1 instrument_id=1 order_id=900 participant_id=1 "
+    "price_ticks=100 remaining_units=5\n"
+    "v=1 type=OrderAccepted time_ns=1 event_seq=3 request_seq=2 instrument_id=1 order_id=1 participant_id=2 "
+    "side=1 order_type=1 original_units=3 limit_ticks=100\n"
+    "v=1 type=OrderRested time_ns=1 event_seq=4 request_seq=2 instrument_id=1 order_id=1 participant_id=2 "
+    "price_ticks=100 remaining_units=3\n"
+    "v=1 type=OrderAccepted time_ns=2 event_seq=5 request_seq=3 instrument_id=1 order_id=2 participant_id=2 "
+    "side=2 order_type=1 original_units=5 limit_ticks=101\n"
+    "v=1 type=OrderRested time_ns=2 event_seq=6 request_seq=3 instrument_id=1 order_id=2 participant_id=2 "
+    "price_ticks=101 remaining_units=5\n"
+    "v=1 type=OrderAccepted time_ns=3 event_seq=7 request_seq=4 instrument_id=1 order_id=50 participant_id=1 "
+    "side=1 order_type=1 original_units=2 limit_ticks=101\n"
+    "v=1 type=Execution time_ns=3 event_seq=8 request_seq=4 instrument_id=1 aggressive_order_id=50 "
+    "resting_order_id=2 aggressive_side=1 buyer_id=1 seller_id=2 price_ticks=101 quantity_units=2\n"
+    "v=1 type=OrderPartiallyFilled time_ns=3 event_seq=9 request_seq=4 instrument_id=1 order_id=2 "
+    "participant_id=2 remaining_units=3\n"
+    "v=1 type=OrderFilled time_ns=3 event_seq=10 request_seq=4 instrument_id=1 order_id=50 participant_id=1 "
+    "remaining_units=0\n"
+    "v=1 type=OrderCancelled time_ns=4 event_seq=11 request_seq=5 instrument_id=1 order_id=2 participant_id=2 "
+    "price_ticks=101 cancelled_units=3\n"
+    "v=1 type=OrderCancelled time_ns=4 event_seq=12 request_seq=6 instrument_id=1 order_id=900 participant_id=1 "
+    "price_ticks=100 cancelled_units=5\n";
+
+ScriptResult run_script(bool record_events = false) {
     const std::array participants{ParticipantId{1}, ParticipantId{2}};
     Simulation simulation{Instrument{{1}, "TEST", TickSize::from_decimal(1, 0).value()}, participants};
     const auto& exchange = simulation.exchange();
@@ -148,6 +177,7 @@ ScriptResult run_script() {
     constexpr std::array<std::uint64_t, 6> ask_heads{0, 0, 2, 2, 0, 0};
     constexpr std::array<std::uint64_t, 6> event_counts{2, 4, 6, 10, 11, 12};
     std::vector<ExchangeEvent> history;
+    std::ostringstream recording;
     for (std::size_t index = 0; index < requests.size(); ++index) {
         const auto* arrival = queue.next();
         require(arrival && arrival->sequence.value == delivery_sequence[index], "script arrival ordering differs");
@@ -168,6 +198,10 @@ ScriptResult run_script() {
         require(exchange.book().check_invariants() && exchange.current_time() == time &&
             exchange.last_request_sequence().value == index + 1 &&
             exchange.last_event_sequence().value == event_counts[index], "script book or committed clock/counters differ");
+        if (record_events) {
+            for (const auto& event : delivered.events) marketlab::write_event_record(recording, event);
+            require(recording.good(), "script recording failed");
+        }
         history.insert(history.end(), delivered.events.begin(), delivered.events.end());
     }
     const auto header = [](std::uint64_t time, std::uint64_t event, std::uint64_t request) {
@@ -194,7 +228,9 @@ ScriptResult run_script() {
         exchange.book().order_count() == 1 && survivor && same_order(survivor->order, accepted_order(later_bid, 2)) &&
         survivor->remaining_quantity.units() == 3 && !exchange.book().find({900}) && !exchange.book().find({2}) &&
         !exchange.book().find({50}), "script final active state differs");
-    return {std::move(history), *survivor};
+    require(record_events ? recording.str() == expected_script_record : recording.str().empty(),
+        "script serialized events differ");
+    return {std::move(history), *survivor, recording.str()};
 }
 
 bool test_lifecycle() {
@@ -267,16 +303,28 @@ bool test_lifecycle() {
         exchange.book().order_count() == 0 && exchange.book().check_invariants();
 }
 
-int main() {
+int main(int argc, char** argv) {
+    const bool print_record = argc == 2 && std::string_view{argv[1]} == "--record-script";
+    if (argc != 1 && !print_record) {
+        std::cerr << "usage: simulation_delivery_tests [--record-script]\n";
+        return 2;
+    }
     try {
         require(test_lifecycle(), "simulation lifecycle, past scheduling, or rejection delivery differs");
         const auto reference = run_script();
+        std::string recording;
         for (int repeat = 0; repeat < 20; ++repeat) {
-            const auto replay = run_script();
+            auto replay = run_script(true);
             require(std::equal(reference.events.begin(), reference.events.end(), replay.events.begin(), replay.events.end(), same_event),
                 "script replay event/execution sequence differs");
             require(same_order(reference.survivor.order, replay.survivor.order) &&
                 reference.survivor.remaining_quantity == replay.survivor.remaining_quantity, "script replay final book differs");
+            recording = std::move(replay.recording);
+        }
+        if (print_record) {
+            std::cout.write(recording.data(), static_cast<std::streamsize>(recording.size()));
+            std::cout.flush();
+            if (!std::cout) return 1;
         }
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
