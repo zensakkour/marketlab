@@ -90,6 +90,35 @@ public:
         return order_ids_.size();
     }
 
+    // Diagnostic for completed operations; temporary sets can throw on allocation.
+    [[nodiscard]] bool check_invariants() const {
+        if (!bids_.empty() && !asks_.empty() && bids_.rbegin()->first >= asks_.begin()->first) {
+            return false;
+        }
+        std::set<OrderId> seen_ids;
+        std::set<RequestSequence> seen_sequences;
+        const auto check_side = [&](const PriceLevels& levels, Side side) {
+            for (const auto& [price, orders] : levels) {
+                if (orders.empty()) {
+                    return false;
+                }
+                RequestSequence previous{};
+                for (const auto& resting : orders) {
+                    const auto& order = resting.order;
+                    if (!is_valid(resting) || order.instrument_id != instrument_id_ || order.side != side ||
+                        *order.limit_price != price || order.arrival_sequence <= previous ||
+                        order.arrival_sequence > last_arrival_sequence_ ||
+                        !seen_ids.insert(order.order_id).second || !seen_sequences.insert(order.arrival_sequence).second) {
+                        return false;
+                    }
+                    previous = order.arrival_sequence;
+                }
+            }
+            return true;
+        };
+        return check_side(bids_, Side::Buy) && check_side(asks_, Side::Sell) && seen_ids == order_ids_;
+    }
+
     [[nodiscard]] bool contains(OrderId id) const {
         return order_ids_.contains(id);
     }

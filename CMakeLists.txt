@@ -12,7 +12,7 @@ if(BUILD_TESTING)
     foreach(test_name IN ITEMS price domain requests orders events simulation
                                order_book order_book_allocation order_book_matching
                                order_book_limit order_book_cancel order_book_market
-                               exchange exchange_scenario)
+                               order_book_invariant exchange exchange_scenario exchange_property)
         add_executable(${test_name}_tests tests/${test_name}_tests.cpp)
         target_link_libraries(${test_name}_tests PRIVATE marketlab)
         if(MSVC)

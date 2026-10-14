@@ -47,6 +47,66 @@ void operator delete[](void* allocation, std::size_t) noexcept {
     ::operator delete(allocation);
 }
 
+bool test_invariant_allocations() {
+    using marketlab::AcceptedOrder;
+    using marketlab::InstrumentId;
+    using marketlab::OrderBook;
+    using marketlab::OrderType;
+    using marketlab::PassiveInsertResult;
+    using marketlab::Price;
+    using marketlab::Quantity;
+    using marketlab::Side;
+    for (std::ptrdiff_t fault = 0; ; ++fault) {
+        OrderBook book{InstrumentId{1}};
+        const auto make_order = [](std::uint64_t id) {
+            return AcceptedOrder{.order_id = {id}, .participant_id = {1}, .instrument_id = {1},
+                .side = id == 5 ? Side::Sell : Side::Buy, .type = OrderType::Limit,
+                .original_quantity = Quantity::from_units(5).value(),
+                .limit_price = Price::from_ticks(id == 5 ? 101 : 100).value(),
+                .accepted_at = {0}, .arrival_sequence = {id}};
+        };
+        for (std::uint64_t id = 1; id <= 5; ++id) {
+            const auto accepted = make_order(id);
+            if (book.insert_passive({accepted, accepted.original_quantity}) != PassiveInsertResult::Inserted) {
+                return false;
+            }
+        }
+        const auto* bid = book.best_bid();
+        const auto* ask = book.best_ask();
+        bool failed = false;
+        allocations_before_failure = fault;
+        try {
+            const bool valid = book.check_invariants();
+            allocations_before_failure = -1;
+            if (!valid) {
+                return false;
+            }
+        } catch (const std::bad_alloc&) {
+            allocations_before_failure = -1;
+            failed = true;
+        }
+        if (book.order_count() != 5 || book.best_bid() != bid || book.best_ask() != ask) {
+            return false;
+        }
+        for (std::uint64_t id = 1; id <= 5; ++id) {
+            const auto* found = book.find({id});
+            if (!found || found->remaining_quantity.units() != 5 || found->order.arrival_sequence.value != id) {
+                return false;
+            }
+        }
+        if (!book.check_invariants()) {
+            return false;
+        }
+        const auto next = make_order(6);
+        if (book.insert_passive({next, next.original_quantity}) != PassiveInsertResult::Inserted || !book.check_invariants()) {
+            return false;
+        }
+        if (!failed) {
+            return true;
+        }
+    }
+}
+
 bool test_exchange_cancel_allocations() {
     using marketlab::CancelRejected;
     using marketlab::CancelRequest;
@@ -100,7 +160,8 @@ bool test_exchange_cancel_allocations() {
                 const auto* ask = exchange.book().best_ask();
                 const auto time = test.reason == RejectionReason::InvalidTimestamp ? 10U : 20U;
                 const auto verify = [&](const auto& result) {
-                    if (!result || result->size() != 1 || !marketlab::is_valid(result->front()) ||
+                    if (!result || !exchange.book().check_invariants() || result->size() != 1 ||
+                        !marketlab::is_valid(result->front()) ||
                         exchange.last_request_sequence().value != before_request.value + 1 ||
                         exchange.last_event_sequence().value != before_event.value + 1 ||
                         exchange.current_time().nanoseconds != time ||
@@ -143,7 +204,8 @@ bool test_exchange_cancel_allocations() {
                     return false;
                 }
                 if (failed) {
-                    if (exchange.current_time().nanoseconds != 10 || exchange.last_request_sequence() != before_request ||
+                    if (!exchange.book().check_invariants() || exchange.current_time().nanoseconds != 10 ||
+                        exchange.last_request_sequence() != before_request ||
                         exchange.last_event_sequence() != before_event || exchange.book().order_count() != 4 ||
                         exchange.book().best_bid() != bid || exchange.book().best_ask() != ask) {
                         return false;
@@ -225,7 +287,7 @@ bool test_exchange_allocations() {
                             const bool rested = scenario != Scenario::Rejected && scenario != Scenario::Market && remaining > 0;
                             const std::size_t events = scenario == Scenario::Rejected ? 1 :
                                 1 + 3 * matches + (remaining > 0 ? 1 : 0);
-                            if (!result || result->size() != events ||
+                            if (!result || !exchange.book().check_invariants() || result->size() != events ||
                                 exchange.last_request_sequence().value != previous_request.value + 1 ||
                                 exchange.last_event_sequence().value != previous_event.value + events ||
                                 exchange.current_time().nanoseconds != 20 ||
@@ -256,7 +318,7 @@ bool test_exchange_allocations() {
                         if (failed) {
                             const auto* first = exchange.book().find({10});
                             const auto* second = exchange.book().find({11});
-                            if (exchange.current_time().nanoseconds != 0 ||
+                            if (!exchange.book().check_invariants() || exchange.current_time().nanoseconds != 0 ||
                                 exchange.last_request_sequence() != previous_request || exchange.last_event_sequence() != previous_event ||
                                 exchange.book().order_count() != static_cast<std::size_t>(existing + 2) ||
                                 exchange.book().best_bid() != bid || exchange.book().best_ask() != ask ||
@@ -335,7 +397,7 @@ bool test_order_allocations() {
                             const auto remaining = crossing ? (units > 8 ? units - 8 : 0) : units;
                             const bool rested = remaining > 0 && !market;
                             const std::size_t executions = crossing ? (units <= 3 ? 1 : 2) : 0;
-                            if (!result || result->remaining_quantity.units() != remaining ||
+                            if (!result || !book.check_invariants() || result->remaining_quantity.units() != remaining ||
                                 result->events.size() != 1 + 3 * executions + (remaining > 0 ? 1 : 0) ||
                                 book.contains(incoming.order_id) != rested ||
                                 book.order_count() != static_cast<std::size_t>(existing) +
@@ -349,7 +411,7 @@ bool test_order_allocations() {
                         if (!failed) {
                             break;
                         }
-                        if (book.order_count() != static_cast<std::size_t>(existing + 2) ||
+                        if (!book.check_invariants() || book.order_count() != static_cast<std::size_t>(existing + 2) ||
                             book.best_bid() != original_bid || book.best_ask() != original_ask ||
                             (side == Side::Buy ? book.best_ask() : book.best_bid())->remaining_quantity.units() != 3 ||
                             (existing && (side == Side::Buy ? book.best_bid() : book.best_ask())->remaining_quantity.units() != 5) ||
@@ -361,7 +423,7 @@ bool test_order_allocations() {
                         // and exposes any partial liquidity consumption beyond the first head.
                         const auto retry = book.process_order(incoming, {100});
                         const auto remaining = crossing ? (units > 8 ? units - 8 : 0) : units;
-                        if (!retry || retry->remaining_quantity.units() != remaining) {
+                        if (!retry || !book.check_invariants() || retry->remaining_quantity.units() != remaining) {
                             std::cerr << "order allocation failure prevented an identical retry\n";
                             return false;
                         }
@@ -430,6 +492,10 @@ bool test_cancel_allocations() {
 }
 
 int main() {
+    if (!test_invariant_allocations()) {
+        std::cerr << "invariant diagnostic allocation failure changed book state\n";
+        return 1;
+    }
     if (!test_exchange_cancel_allocations()) {
         std::cerr << "exchange cancellation allocation failure changed state or prevented retry\n";
         return 1;

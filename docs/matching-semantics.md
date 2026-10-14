@@ -292,6 +292,24 @@ state changes. No pointer index is maintained. This query neither validates a
 cancellation request nor checks its ownership; the separate `cancel()` operation
 follows section 8 as described below.
 
+`check_invariants()` performs a const structural diagnostic at completed operation
+boundaries. Each level must be nonempty; each queued record must be an intrinsically
+valid resting limit for the book instrument, with its side and original limit
+matching the containing price level. Arrival request sequences are strictly
+increasing within each FIFO, globally unique among active orders, and no greater
+than the last successful book operation sequence. Active IDs are unique across
+both sides and correspond exactly to the active-ID set. A bid must be strictly
+below an ask whenever both sides are present. Ordered price maps establish level
+ordering; partial fills retain the original arrival metadata.
+
+The diagnostic changes no book state and uses temporary ID/sequence sets with
+O(N log N) work and O(N) memory. Allocation exceptions propagate and leave all
+book records, index entries, priority and borrowed views unchanged. Invoke it
+explicitly after a book operation returns; intermediate remainder preparation is
+private to processing. Exchange registration, clock and lifetime identity history
+remain owned by the exchange; generated-workload tests independently reconcile
+executions against their own active-order ledger.
+
 `match_one()` consumes at most one eligible opposite FIFO head for an accepted
 limit order and a positive supplied remainder no greater than the original quantity.
 It validates record shape, instrument, absence of an active incoming ID, arrival
@@ -493,7 +511,20 @@ priority, final time/counters, and unchanged previously returned event buffers.
 The existing request/book/exchange tests add both-side and boundary coverage for
 invalid enums, zero/unknown IDs, price/quantity maxima, partial-fill priority,
 equal timestamps, validation precedence, and counter capacity. The canonical suite
-does not replace the remaining full book-invariant and generated-workload gates.
+also checks book structural invariants after each preparation step and the final
+request. `tests/order_book_invariant_tests.cpp` adds primitive-operation and
+corruption-detection coverage, while allocation tests validate failure/retry state.
+`tests/exchange_property_tests.cpp` supplies controlled generated workloads and
+execution reconciliation. An independent flat scan of a test-owned ledger checks
+best price/FIFO against each returned execution. Both order remainders are reduced
+by the checked minimum quantity; reported status, resting, expiry and cancellation
+values must agree with that ledger. Active records, original acceptance metadata,
+clock/counters and structural invariants are checked after every request.
+Generation uses a fixed seed, nonmonotonic IDs, three participants, bounded active
+state and occasional maximum quantities. Failure reports the seed, request number
+and complete input prefix; a test-only execution perturbation verifies exact replay.
+The default CTest run repeats four 5,000-request workloads. Larger bounded-state
+runs are available through the seed/count arguments documented in the README.
 
 ## Specification review
 

@@ -105,6 +105,14 @@ It provides current ownership and remainder data for cancellation.
 The book cannot be copied or moved. Its insertion results are storage diagnostics,
 not exchange rejections: `WouldCross` means matching is required.
 
+`check_invariants()` is a const diagnostic for completed book operations. It checks
+non-crossing best prices, nonempty levels, valid positive bounded resting
+quantities, instrument/side/price alignment, strict FIFO arrival priority, unique
+active IDs and request sequences, and exact agreement with the active-ID index.
+It uses temporary sets (O(N log N) work and O(N) memory for N resting orders);
+allocation failures propagate without changing the book. It is called explicitly
+by validation code after processing, when resting state is complete.
+
 `match_one()` matches an accepted limit remainder against at most one best-priced
 opposite FIFO head. It returns `std::expected<std::optional<SingleMatch>, MatchError>`:
 an error means invalid operation input, an empty optional means no eligible order,
@@ -209,18 +217,32 @@ build files; building compiles the test executables; CTest runs them. Tests are
 enabled explicitly, and compiler warnings are treated as errors.
 
 A successful test run ends with `100% tests passed, 0 tests failed`.
-Currently there are fourteen registered tests: `price`, `domain`, `requests`, `orders`,
+Currently there are sixteen registered tests: `price`, `domain`, `requests`, `orders`,
 `events`, `simulation`, `order_book`, `order_book_allocation`, `order_book_matching`,
-`order_book_limit`, `order_book_cancel`, `order_book_market`, `exchange`, and
-`exchange_scenario`.
+`order_book_limit`, `order_book_cancel`, `order_book_market`, `order_book_invariant`,
+`exchange`, `exchange_scenario`, and `exchange_property`.
 `--output-on-failure` prints diagnostics from failing tests, and CTest returns a
 nonzero exit code on failure.
 
 `exchange_scenario` runs all 23 canonical rows from the matching contract through
 the raw exchange entry points. It checks complete ordered event records, final
 active orders and FIFO heads, original order metadata, time/counters, and preserved
-previously returned events. The existing tests retain boundary and allocation-failure
-coverage; the full invariant and generated-workload gates remain future work.
+previously returned events. Structural invariants are checked after each prepared
+request and the final request. `order_book_invariant` exercises the public book
+operations and deliberately corrupts/restores test-owned records to check detection.
+Allocation tests check invariants after failure/retry and verify the diagnostic
+itself preserves state when its temporary allocations fail.
+
+`exchange_property` runs four fixed seeds, 5,000 requests per seed, twice
+(40,000 verified requests). A separate execution ledger checks prices, price/FIFO
+priority, counterparties, bounded quantity subtraction, status/remainder events,
+active records, lifetime duplicates, clock/counters and structural invariants
+after each request. Test generation uses one seeded `std::mt19937_64` with explicit
+integer mapping, nonmonotonic client IDs, three registered participants, and up to
+64 active orders. It includes passive/aggressive limits, markets, successful and
+rejected cancels, invalid new orders and maximum signed quantities. A deliberate
+error in a returned execution is detected and reproduced from its seed and request
+number; the production matching path is unchanged.
 
 After editing C++ code, rerun the build and CTest commands. Rerun configuration
 after changing `CMakeLists.txt` or build options.
@@ -268,9 +290,13 @@ $LASTEXITCODE
 $LASTEXITCODE
 .\build\debug\order_book_market_tests.exe
 $LASTEXITCODE
+.\build\debug\order_book_invariant_tests.exe
+$LASTEXITCODE
 .\build\debug\exchange_tests.exe
 $LASTEXITCODE
 .\build\debug\exchange_scenario_tests.exe
+$LASTEXITCODE
+.\build\debug\exchange_property_tests.exe
 $LASTEXITCODE
 ```
 
@@ -301,9 +327,13 @@ echo $?
 echo $?
 ./build/debug/order_book_market_tests
 echo $?
+./build/debug/order_book_invariant_tests
+echo $?
 ./build/debug/exchange_tests
 echo $?
 ./build/debug/exchange_scenario_tests
+echo $?
+./build/debug/exchange_property_tests
 echo $?
 ```
 
@@ -320,15 +350,46 @@ cmake --build build/release
 ctest --test-dir build/release --output-on-failure
 ```
 
+### Reproduce a generated workload
+
+Run one seed with a chosen request count (decimal seed 0 through UINT64_MAX;
+request count 1 through 1,000,000):
+
+```powershell
+.\build\debug\exchange_property_tests.exe 42 100000
+$LASTEXITCODE
+```
+
+In a Unix shell, use `./build/debug/exchange_property_tests 42 100000`.
+Success is silent with exit code 0. Failure returns 1 and prints the seed,
+one-based failing request number, replay arguments and the complete raw request
+prefix. Replaying a seed requires the same engine/test version; the printed
+requests retain exact IDs, fields and timestamps for inspection. Invalid CLI
+arguments return 2 with usage.
+
+An optional third argument alters the first returned execution at that request,
+without changing production code. This verifies failure reporting and replay:
+
+```powershell
+.\build\debug\exchange_property_tests.exe 42 256 4
+$LASTEXITCODE
+```
+
+This control intentionally exits 1 at request 4 with an execution-quantity
+reconciliation error. Selecting a request without an execution also exits 1
+with a diagnostic. The regular CTest target verifies this failure internally
+and succeeds only when its seed/request replay produces the same error and prefix.
+These generated workloads validate correctness.
+
 ### GCC checked-container tests
 
 GCC/libstdc++ can also check container and iterator operations at runtime in a
-separate build. These commands build and run the eight book/exchange tests:
+separate build. These commands build and run the ten book/exchange tests:
 
 ```powershell
 cmake -S . -B build/checked -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DCMAKE_CXX_FLAGS=-D_GLIBCXX_DEBUG
-cmake --build build/checked --target order_book_tests order_book_allocation_tests order_book_matching_tests order_book_limit_tests order_book_cancel_tests order_book_market_tests exchange_tests exchange_scenario_tests
-ctest --test-dir build/checked --output-on-failure -R "^(order_book(_allocation|_matching|_limit|_cancel|_market)?|exchange(_scenario)?)$"
+cmake --build build/checked --target order_book_tests order_book_allocation_tests order_book_matching_tests order_book_limit_tests order_book_cancel_tests order_book_market_tests order_book_invariant_tests exchange_tests exchange_scenario_tests exchange_property_tests
+ctest --test-dir build/checked --output-on-failure -R "^(order_book(_allocation|_matching|_limit|_cancel|_market|_invariant)?|exchange(_scenario|_property)?)$"
 ```
 
 Keep this build separate: the flag changes standard-container layouts, so code

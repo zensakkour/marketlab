@@ -331,7 +331,7 @@ bool run_scenario(const Scenario& scenario) {
     std::vector<std::vector<ExchangeEvent>> history;
     for (const auto& command : scenario.preparation) {
         auto result = process(exchange, command);
-        if (!result || result->empty() ||
+        if (!result || !exchange.book().check_invariants() || result->empty() ||
             (!std::holds_alternative<OrderAccepted>(result->front()) &&
              !std::holds_alternative<OrderCancelled>(result->front())) ||
             !std::ranges::all_of(*result, [](const auto& event) { return marketlab::is_valid(event); })) {
@@ -353,7 +353,8 @@ bool run_scenario(const Scenario& scenario) {
         }
     }
     const auto last = event_header(scenario.events.back());
-    if (!check_book(exchange.book(), scenario) || exchange.current_time() != last.timestamp ||
+    if (!exchange.book().check_invariants() || !check_book(exchange.book(), scenario) ||
+        exchange.current_time() != last.timestamp ||
         exchange.last_request_sequence() != last.request_sequence || exchange.last_event_sequence() != last.event_sequence) {
         std::cerr << scenario.name << ": final book, counters, or time differ\n";
         return false;
