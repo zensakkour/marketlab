@@ -83,14 +83,14 @@ only limit orders can rest. These records check intrinsic consistency through
 Logical timestamps are unsigned 64-bit nanoseconds from the simulation origin;
 zero is valid. Requests are processed with nondecreasing timestamps. A backward
 timestamp is rejected without advancing logical time. v0 allows every request
-to use timestamp zero. Future scheduling must preserve this ordering contract.
+to use timestamp zero. Simulation scheduling preserves this ordering contract.
 Wall-clock time and thread scheduling never determine priority.
 
 ### Scheduled arrival records
 
 `SimulationEvent` represents a scheduled order or cancel arrival. Its request
 timestamp is the scheduled exchange-arrival time, and its `SimulationSequence`
-is distinct from exchange request/event sequences. The future scheduler assigns
+is distinct from exchange request/event sequences. `SimulationQueue` assigns
 unique positive unsigned 64-bit sequences in scheduling insertion order, starting
 at one, without wrapping. Records order by arrival time first, then this sequence.
 At equal times, the request added to the schedule first reaches the exchange first,
@@ -99,10 +99,55 @@ The exchange assigns its own request sequence when it processes the arrival.
 
 `is_valid(SimulationEvent)` checks assigned simulation identity and payload
 presence; it deliberately permits malformed request fields for exchange rejection.
-`scheduled_before()` compares scheduling keys only. Queue ownership, unique
-sequence assignment, capacity checks, scheduling relative to current time, and
-delivery behavior belong to the later scheduler. Participant actions and delayed
-report/market-data delivery are outside the current arrival-record scope.
+`scheduled_before()` compares scheduling keys only.
+
+`SimulationQueue` owns the pending arrivals and assigns their sequence on successful
+`schedule(SimulationRequest)` calls. Callers supply raw requests, not scheduling
+identities. A failed insertion consumes no sequence and preserves the existing
+queue. Sequence exhaustion or the vector storage maximum returns an explicit
+`SimulationQueueError`; allocation exceptions propagate without changing pending
+records, ordering, the counter or borrowed views. Nonthrowing payload moves and
+heap comparisons permit sequence commit only after storage succeeds.
+
+`next()` is a const borrowed view of the earliest arrival; reacquire it after a
+successful mutation. `pop_next()` transfers the earliest record without allocation
+and returns an empty optional when no arrival remains. Emptying the queue does not
+reset its counter. Queue copies/moves are disabled to keep ownership explicit.
+
+`Simulation` owns an exchange and its queue with one logical writer. Construction
+starts at logical time zero. `schedule()` accepts current/future arrival times and
+refuses the past before queue mutation, without an exchange event or sequence
+consumption. Other malformed request fields are preserved for exchange rejection.
+Scheduling sequence/storage errors are explicit; allocation exceptions leave
+simulation state unchanged.
+
+`step()` delivers the earliest arrival using the existing exchange entry points.
+A `SimulationStep` owns that arrival and its returned events. An empty optional
+means the queue is drained, while an expected error reports an `ExchangeError`.
+A committed order/cancel rejection also removes its arrival and advances time
+according to the exchange contract. Engine errors and allocation exceptions keep
+the head pending and preserve committed time, book, identity history and counters;
+the caller stops on an engine error. Removal and result transfer after commitment
+are nonthrowing and allocation-free.
+
+The exchange clock is authoritative; the runner maintains no duplicate clock.
+Empty steps do not advance time. A drained simulation may resume with new arrivals
+at the current or a future timestamp; all counters retain their history. Only
+const exchange/queue views are exposed. No callback interleaves with request
+processing. Participant actions and delayed report/market-data delivery remain
+later work.
+
+`tests/simulation_delivery_tests.cpp` verifies the scripted bid, ask, partial
+execution and cancellations through `Simulation::step()`. It checks chronological
+arrival, equal-time insertion FIFO, complete exchange events, intermediate
+heads/invariants, clock/counters and final active records. Simulation identities
+differ from request sequences. Twenty fresh replays reproduce the complete
+event/execution sequence and final book. Lifecycle tests cover initial/empty
+steps, committed rejections, refusal of past requests, equal-time restart and
+maximum logical time.
+Allocation tests cover retained arrivals and unchanged exchange state followed
+by identical retry for limit/market matching, owned cancellation and both kinds
+of rejection, with later arrivals still present.
 
 ## 5. Limit orders
 
@@ -436,7 +481,8 @@ must stop the run on capacity failure. Allocation exceptions propagate. A book
 input diagnostic after validated exchange acceptance indicates an internal
 invariant failure and throws `std::logic_error` without committing the request.
 `current_time()`, `last_request_sequence()`, and `last_event_sequence()` report
-committed state. Recording and the scheduler are still future work.
+committed state. `Simulation` owns scheduled request delivery; recording remains
+future work.
 
 `Exchange::process_cancel(CancelRequest)` returns the same expected vector type,
 containing exactly one `OrderCancelled` or `CancelRejected` event. It shares

@@ -26,7 +26,7 @@ struct SimulationEvent {
     return std::visit([](const auto& request) { return request.timestamp; }, event.request);
 }
 
-// A future scheduler assigns sequences in insertion order, independently of the
+// SimulationQueue assigns sequences in insertion order, independently of the
 // exchange's processing sequences. Earlier time takes precedence over that tie-break.
 [[nodiscard]] constexpr bool scheduled_before(
     const SimulationEvent& left, const SimulationEvent& right) {

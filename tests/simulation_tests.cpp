@@ -89,7 +89,7 @@ int main() {
         return 1;
     }
 
-    // Duplicate keys compare equivalent; uniqueness requires future scheduler state.
+    // Duplicate standalone keys compare equivalent; SimulationQueue assigns unique keys.
     const SimulationEvent same_key{{1}, CancelRequest{.timestamp = {0}}};
     if (scheduled_before(first, same_key) || scheduled_before(same_key, first)) {
         std::cerr << "payload kind affected identical scheduling keys\n";

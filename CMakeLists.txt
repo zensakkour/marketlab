@@ -10,6 +10,8 @@ target_compile_features(marketlab INTERFACE cxx_std_23)
 include(CTest)
 if(BUILD_TESTING)
     foreach(test_name IN ITEMS price domain requests orders events simulation
+                               simulation_queue simulation_queue_allocation
+                               simulation_delivery
                                order_book order_book_allocation order_book_matching
                                order_book_limit order_book_cancel order_book_market
                                order_book_invariant exchange exchange_scenario exchange_property)
