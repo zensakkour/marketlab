@@ -43,31 +43,32 @@ quantities with checked subtraction, distinct order/participant/instrument IDs,
 order sides/types, logical timestamps, instrument tick configuration,
 order/cancel requests, accepted/resting orders, executions, exchange events,
 scheduled request records, passive order-book storage, single-match limit fills,
-read-only match counting, complete accepted-limit processing, active-order lookup,
-and owned-order cancellation.
+read-only limit match counting, complete accepted-order processing for limits and
+markets, active-order lookup, owned-order cancellation, and raw order/cancel
+processing through a single-instrument exchange.
 Logical timestamps count unsigned 64-bit nanoseconds from the simulation origin.
 Tick sizes use a positive decimal coefficient and a scale from 0 through 18;
 instrument configuration requires a nonzero ID and a nonempty symbol.
 
 For v0, a participant is represented by its `ParticipantId`. Orders and executions
-carry that identity directly. Participant registration will belong to exchange
-configuration; strategy behavior, positions, cash, and PnL are later components.
+carry that identity directly. Participant registration belongs to fixed
+`Exchange` configuration; strategy behavior, positions, cash, and PnL are later components.
 
 Submitted order quantities must be positive; zero is supported for remaining
 quantities after a complete fill. Requests retain raw quantity and tick-price
 values so invalid submissions can be rejected explicitly. `validate_fields()`
 checks numeric IDs, side/type, quantity, and price fields in the specified order
-and returns an optional rejection reason. Registration, lifetime duplicates, and
-clock ordering require the future exchange core; passing field validation alone
-does not accept an order.
+and returns an optional rejection reason. `Exchange::process_order()` checks
+registration, lifetime duplicates, and clock ordering; passing field validation alone does not accept an order.
 
 Accepted orders retain their original quantity and request sequence for arrival
 priority. Resting records require a limit order and a positive remainder no
 greater than its original quantity. Executions carry both order IDs, buyer and
 seller IDs, the aggressive side, exact price and quantity, logical time, and
 distinct request/event sequences. Record `is_valid()` checks intrinsic consistency;
-the future exchange must establish acceptance, book membership, and matching
-correctness. One execution represents one trade, including permitted self-matches.
+the exchange establishes acceptance and delegates book membership and matching
+to its owned book. One execution represents one trade, including permitted
+self-matches.
 
 `ExchangeEvent` is a `std::variant` of the nine contract events: acceptance,
 execution, partial fill, full fill, resting, market-remainder expiry, cancellation,
@@ -75,9 +76,10 @@ order rejection, and cancel rejection. Successful records require valid numeric
 IDs and quantities consistent with their status. Rejections retain the submitted
 request, including invalid fields, and its rejection reason. Backward-time
 rejections preserve the submitted timestamp while carrying current logical time.
-`process_limit()` produces accepted-limit events, and `cancel()` returns a
-successful cancellation record. Raw request rejection selection and market-order
-processing require the future exchange core.
+`OrderBook::process_order()` produces accepted limit/market events, and its
+`cancel()` returns a successful cancellation record. `Exchange::process_order()`
+accepts raw new orders and produces their accepted events or one `OrderRejected`.
+`Exchange::process_cancel()` returns one `OrderCancelled` or `CancelRejected`.
 
 `SimulationEvent` holds a raw order or cancel request and a distinct simulation
 sequence. The request timestamp is its scheduled exchange-arrival time.
@@ -121,12 +123,16 @@ overflow. This supports capacity checks before complete limit processing;
 the single writer must keep the book unchanged between counting and matching.
 The count does not reserve output storage, assign sequences, or process a request.
 
-`process_limit()` handles a complete accepted limit across eligible price levels,
-then rests any positive remainder at its original limit and arrival priority. Its
-`LimitResult` contains the ordered `ExchangeEvent` records and remaining quantity:
+`process_order()` handles a complete accepted limit or market order across opposite
+price levels. Limits stop at their price boundary and rest any positive remainder
+at their original limit and arrival priority. Markets have no price boundary,
+never rest, and emit `MarketRemainderExpired` for any unfilled remainder, including
+the entire quantity when opposite liquidity is empty. Its
+`OrderResult` contains the ordered `ExchangeEvent` records and remaining quantity:
 acceptance, then execution/resting status/incoming status for each match, followed
-by resting when applicable. The caller supplies the first event sequence; the
-operation checks the exact contiguous range without wrapping before changing state.
+by resting or market-remainder expiry when applicable. The caller supplies the
+first event sequence; the operation checks the exact contiguous range without
+wrapping before changing state.
 It reserves event storage and prepares any resting remainder before consuming
 liquidity. Diagnostic errors or allocation failures leave the book unchanged;
 allocation failures propagate. Successful processing advances book arrival priority,
@@ -140,14 +146,43 @@ The record contains the cancellation timestamp, supplied sequences, owner, price
 and remaining quantity. Removal preserves survivor FIFO/metadata and deletes empty
 levels and active IDs. The operation allocates no memory. `CancelError` diagnostics
 leave the book unchanged; successful cancellation advances book arrival priority.
-Clock/registration checks, global counter ownership, lifetime accepted-ID history,
-and creation of `CancelRejected` events belong to the future exchange.
+`Exchange::process_cancel()` establishes clock/registration validity, assigns
+sequences, and creates `CancelRejected` events for raw cancellation failures.
 
-Limit operations consume trusted accepted records. A future exchange must validate
-raw requests, registration, logical time, and lifetime accepted-ID uniqueness, own
-request/event counters across calls, and record returned events. Market orders,
-the exchange entry point, and the decimal price adapter remain future
-work. This single-writer book does not invoke callbacks or publish intermediate state.
+Book processing consumes trusted accepted records. `Exchange` owns one configured
+instrument, a fixed set of registered participants, its book, lifetime accepted
+IDs, logical time, and request/event counters. Construct it with an `Instrument`
+and a `std::span<const ParticipantId>`; configuration is copied, zero participant
+IDs are invalid, repeated registrations name the same participant, and an empty
+participant set accepts no orders. The instrument must be intrinsically valid.
+
+`Exchange::process_order(OrderRequest)` returns
+`std::expected<std::vector<ExchangeEvent>, ExchangeError>`. A value contains the
+complete accepted-order stream or exactly one rejection preserving the raw request.
+Validation follows the contract's timestamp, registration, field, then lifetime-ID
+precedence. Filled and expired accepted IDs remain reserved. Rejected IDs are reusable.
+Non-backward requests advance logical time even when rejected; backward requests
+are rejected at current time. Requests and events are numbered from one, including
+rejections; equal timestamps retain call order.
+
+`Exchange::process_cancel(CancelRequest)` returns the same expected event-vector
+type, with exactly one returned event. It validates timestamp, configured
+instrument/participant, and target ID before active status and ownership. Valid
+owned cancellation removes only the remaining quantity; inactive targets produce
+`NotActive`, and active targets owned by another participant produce `NotOwner`.
+Cancelled IDs stay reserved for the exchange lifetime. Both entry points share
+logical time and counters, including rejections. Cancellation prepares its event
+storage before removing the order, so an allocation failure changes no state.
+
+`ExchangeError` reports request/event sequence exhaustion or unrepresentable output
+capacity, without processing the request; stop the run on a capacity error.
+Allocation exceptions propagate and leave book, ID history, time, and counters
+unchanged, permitting an identical retry. All potentially allocating work precedes
+fills and state commitment. `book()` exposes only a borrowed const view; reacquire
+resting-order pointers after processing. `current_time()`, `last_request_sequence()`,
+and `last_event_sequence()` expose committed state (both sequences start at zero
+before the first request). One writer processes calls without callbacks.
+Recording, scheduling, and the decimal price adapter remain future work.
 
 ### Requirements
 
@@ -174,9 +209,9 @@ build files; building compiles the test executables; CTest runs them. Tests are
 enabled explicitly, and compiler warnings are treated as errors.
 
 A successful test run ends with `100% tests passed, 0 tests failed`.
-Currently there are eleven registered tests: `price`, `domain`, `requests`, `orders`,
+Currently there are thirteen registered tests: `price`, `domain`, `requests`, `orders`,
 `events`, `simulation`, `order_book`, `order_book_allocation`, `order_book_matching`,
-`order_book_limit`, and `order_book_cancel`.
+`order_book_limit`, `order_book_cancel`, `order_book_market`, and `exchange`.
 `--output-on-failure` prints diagnostics from failing tests, and CTest returns a
 nonzero exit code on failure.
 
@@ -194,9 +229,10 @@ cmake -S . -B build/debug -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -
 
 ### Run an executable directly
 
-The runnable targets exercise domain types and book operations.
-A simulation executable will be added when the exchange core exists. CTest is the usual way to run tests;
-you can also run any test directly after building.
+The runnable targets exercise domain types, book operations, and raw order/cancel
+processing. A simulation executable will be added with end-to-end scenarios.
+CTest is the usual way to run tests; you can also run any test directly after
+building.
 
 In Windows PowerShell:
 
@@ -222,6 +258,10 @@ $LASTEXITCODE
 .\build\debug\order_book_limit_tests.exe
 $LASTEXITCODE
 .\build\debug\order_book_cancel_tests.exe
+$LASTEXITCODE
+.\build\debug\order_book_market_tests.exe
+$LASTEXITCODE
+.\build\debug\exchange_tests.exe
 $LASTEXITCODE
 ```
 
@@ -250,6 +290,10 @@ echo $?
 echo $?
 ./build/debug/order_book_cancel_tests
 echo $?
+./build/debug/order_book_market_tests
+echo $?
+./build/debug/exchange_tests
+echo $?
 ```
 
 Each test is silent on success and returns exit code `0`. On failure it prints a
@@ -268,12 +312,12 @@ ctest --test-dir build/release --output-on-failure
 ### GCC checked-container tests
 
 GCC/libstdc++ can also check container and iterator operations at runtime in a
-separate build. These commands build and run only the five order-book tests:
+separate build. These commands build and run the seven book/exchange tests:
 
 ```powershell
 cmake -S . -B build/checked -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DCMAKE_CXX_FLAGS=-D_GLIBCXX_DEBUG
-cmake --build build/checked --target order_book_tests order_book_allocation_tests order_book_matching_tests order_book_limit_tests order_book_cancel_tests
-ctest --test-dir build/checked --output-on-failure -R "^order_book(_allocation|_matching|_limit|_cancel)?$"
+cmake --build build/checked --target order_book_tests order_book_allocation_tests order_book_matching_tests order_book_limit_tests order_book_cancel_tests order_book_market_tests exchange_tests
+ctest --test-dir build/checked --output-on-failure -R "^(order_book(_allocation|_matching|_limit|_cancel|_market)?|exchange)$"
 ```
 
 Keep this build separate: the flag changes standard-container layouts, so code

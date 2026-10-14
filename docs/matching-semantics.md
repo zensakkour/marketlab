@@ -267,10 +267,10 @@ independently mutated source of market state.
 and FIFO queues, with a separate set of active order IDs. It is noncopyable and
 nonmovable. `insert_passive()` takes an intrinsically valid resting limit for its
 instrument, with an unused active ID and a request sequence greater than the last
-successful passive insertion, complete limit operation, or cancellation.
+successful passive insertion, complete order operation, or cancellation.
 Sequence gaps are allowed; failed insertions reserve no ID and do not advance
-arrival priority. The outer exchange remains responsible for lifetime accepted-ID
-history, registration, and logical-clock validation.
+arrival priority. The owning exchange supplies lifetime accepted-ID history,
+registration, and logical-clock validation for raw requests.
 
 Passive insertion cannot leave a crossed book. `WouldCross` reports that the
 operation requires matching; it is not a new exchange rejection reason. Allocation
@@ -295,7 +295,7 @@ follows section 8 as described below.
 `match_one()` consumes at most one eligible opposite FIFO head for an accepted
 limit order and a positive supplied remainder no greater than the original quantity.
 It validates record shape, instrument, absence of an active incoming ID, arrival
-sequence greater than the last successful passive insertion, complete limit
+sequence greater than the last successful passive insertion, complete order
 operation, or cancellation, and a nonzero caller-supplied execution sequence.
 Its `MatchError` values are operation diagnostics, not exchange rejection reasons. Errors and absence of eligible liquidity leave the book unchanged.
 
@@ -328,8 +328,9 @@ on failure.
 subsequent passive remainder keeps its original incoming sequence. The single
 writer must finish that matching and resting before another request interleaves.
 
-`process_limit()` processes one complete trusted accepted limit. It validates the
-record and book-level input conditions, previews the exact match count and final
+`process_order()` processes one complete trusted accepted limit or market. Its
+`OrderResult` owns the ordered events and the final unfilled quantity. It validates
+the record and book-level input conditions, previews the exact match count and final
 remainder, and checks output-size arithmetic and the contiguous event-sequence
 range starting at the caller-supplied positive sequence. Zero produces
 `InvalidEventSequence`; a range that would wrap produces `EventSequenceExhausted`.
@@ -339,22 +340,26 @@ capacity ending at the maximum sequence is usable; the caller must prevent any
 further allocation from wrapping.
 
 The operation reserves the complete event vector, then stores any positive
-incoming remainder before consuming opposite liquidity. Private storage preparation
-may briefly cross the book inside the call; one writer, no callbacks, and no
-concurrent observers keep that state unobservable. Storage allocation failures
+incoming limit remainder before consuming opposite liquidity. Private storage
+preparation may briefly cross the book inside the call; one writer, no callbacks,
+and no concurrent observers keep that state unobservable. Storage allocation failures
 roll back before any execution occurs. After preparation, fills and event
 construction allocate no memory and use nonthrowing value records. Matching uses
 the same resting-price/minimum-quantity primitive as `match_one()`. Return events
-follow section 10 exactly. The positive remainder retains the original limit,
-quantity, acceptance time, and arrival priority; full incoming fills do not rest.
+follow section 10 exactly. Positive limit remainders retain the original limit,
+quantity, acceptance time, and arrival priority. Markets consume all opposite
+prices in best-price/FIFO order, never allocate resting storage, and emit `MarketRemainderExpired` for any
+positive remainder. A zero-execution market produces exactly acceptance and expiry.
+Fully filled incoming orders produce neither resting nor expiry.
 Successful processing advances book arrival priority, including fully filled
 orders. Errors and allocation failures leave book state and arrival priority
 unchanged; allocation exceptions propagate.
 
-The caller still establishes exchange acceptance, clock/registration/lifetime-ID
-validity, request-sequence assignment, global event-counter uniqueness, and event
-recording. `process_limit()` neither accepts raw requests nor emits rejections.
-Market matching and the exchange entry point remain unimplemented.
+The caller establishes exchange acceptance, clock/registration/lifetime-ID
+validity, request-sequence assignment, and global event-counter uniqueness.
+`OrderBook::process_order()` neither accepts raw requests nor emits rejections.
+`Exchange::process_order()` now provides that boundary for new orders; event
+recording remains unimplemented.
 
 `cancel()` takes a `CancelRequest` and caller-assigned request/event sequences,
 returning `std::expected<OrderCancelled, CancelError>`. It checks the instrument
@@ -378,6 +383,62 @@ or wrap; subsequent global counter management remains with the exchange. The
 exchange must retain lifetime accepted-ID history and emit `CancelRejected` when
 appropriate. The primitive returns one successful record or a diagnostic, with
 no executions, accounting changes, or rejection-event production.
+
+### Current raw request entry points
+
+`Exchange` owns one intrinsically valid `Instrument`, fixed registered participant
+IDs copied from a span, a private book, lifetime accepted IDs, current logical time,
+and last-assigned request/event sequences. Zero participant registrations fail
+construction; repeated registrations refer to one participant, and an empty set
+accepts no orders. Configuration cannot be changed after construction. The exchange
+is noncopyable/nonmovable and exposes only a const borrowed book view.
+
+`Exchange::process_order(OrderRequest)` returns an expected vector of exchange
+events or `ExchangeError`. It selects the first rejection from section 9,
+including timestamp/registration checks before intrinsic fields and lifetime
+duplicates last. Rejections retain the complete supplied request. Non-backward
+requests advance time even if rejected; backward requests emit at existing current
+time. Both accepted and rejected requests receive one unique request sequence.
+Event sequences remain contiguous across calls, including single-event rejections.
+Counters start unassigned at zero; first assigned values are one. The largest
+unsigned value is usable, and a further assignment fails before incrementing.
+
+Accepted orders delegate matching/event construction to the owned book. Lifetime
+ID storage is prepared before that call and rolled back on any book diagnostic or
+allocation exception. Event output and passive storage preparation precede fills.
+Clock/counters commit only once the entire result is ready; event-vector return is
+nonthrowing. Filled and expired IDs remain reserved; rejection reserves none.
+An identical retry after allocation failure sees unchanged book, history, time,
+and counters. There are no callbacks or interleaved requests inside processing.
+
+`RequestSequenceExhausted`, `EventSequenceExhausted`, and
+`OutputCapacityExceeded` are engine capacity errors, not exchange rejections;
+no request, event, time advancement, or state mutation is committed. The caller
+must stop the run on capacity failure. Allocation exceptions propagate. A book
+input diagnostic after validated exchange acceptance indicates an internal
+invariant failure and throws `std::logic_error` without committing the request.
+`current_time()`, `last_request_sequence()`, and `last_event_sequence()` report
+committed state. Recording and the scheduler are still future work.
+
+`Exchange::process_cancel(CancelRequest)` returns the same expected vector type,
+containing exactly one `OrderCancelled` or `CancelRejected` event. It shares
+request/event counters and logical time with new-order processing. Timestamp,
+instrument registration, participant registration, and nonzero target ID checks
+precede the book's active-status and ownership checks, in section 9 order.
+Inactive targets emit `NotActive` before ownership is considered; a different
+registered participant's active target emits `NotOwner`. Cancel rejections retain
+the entire submitted request and have the same clock behavior as new-order
+rejections. Successful cancellation reports the original limit and current
+remainder, preserves survivor FIFO/metadata and all prior executions, and never
+releases the target's lifetime accepted ID.
+
+The entry point reserves its one-event output before calling the book's
+nonallocating cancellation. After removal, event construction and result return
+are checked as nonthrowing. Allocation failure commits no removal, lifetime-ID
+change, clock advancement, or sequence assignment, so identical retry is valid.
+Book input diagnostics beyond `NotActive/NotOwner` indicate internal invariant
+failure and throw `std::logic_error` before request commitment. Capacity failures
+use the same engine errors and stop-run requirement as new orders.
 
 ## 12. Canonical examples
 

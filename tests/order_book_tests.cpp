@@ -84,7 +84,7 @@ bool test_lookup_transitions() {
         return false;
     }
     incoming = make_order(98, 6, Side::Buy, 101).order;
-    const auto multi = book.process_limit(incoming, {2});
+    const auto multi = book.process_order(incoming, {2});
     remaining = book.find(second.order.order_id);
     worse_found = book.find(worse.order.order_id);
     if (!multi || book.find(first.order.order_id) || book.find(incoming.order_id) ||
@@ -95,7 +95,7 @@ bool test_lookup_transitions() {
     }
     incoming = make_order(97, 7, Side::Buy, 101).order;
     incoming.original_quantity = Quantity::from_units(10).value();
-    const auto rest = book.process_limit(incoming, {10});
+    const auto rest = book.process_order(incoming, {10});
     remaining = book.find(incoming.order_id);
     const auto* own_found = book.find(own_side.order.order_id);
     if (!rest || book.find(second.order.order_id) || book.find(worse.order.order_id) ||
@@ -106,7 +106,7 @@ bool test_lookup_transitions() {
     }
     auto sell = make_order(96, 8, Side::Sell, 101).order;
     sell.original_quantity = Quantity::from_units(2).value();
-    const auto filled = book.process_limit(sell, {30});
+    const auto filled = book.process_order(sell, {30});
     return filled && !book.find(incoming.order_id) && !book.find(sell.order_id) &&
         book.order_count() == 1 && book.find(own_side.order.order_id) == book.best_bid() &&
         !book.find(OrderId{0}) && !book.find(OrderId{123});

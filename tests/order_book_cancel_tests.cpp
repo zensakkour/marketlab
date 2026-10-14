@@ -178,7 +178,7 @@ bool test_errors_and_partial_fill() {
         return false;
     }
     incoming = make_order(4, 5, Side::Buy, 100).order;
-    const auto fill = book.process_limit(incoming, {43});
+    const auto fill = book.process_order(incoming, {43});
     const CancelRequest filled_request{{0}, {1}, next.order.participant_id, next.order.order_id};
     const auto inactive = book.cancel(filled_request, {6}, {47});
     return fill && !inactive && inactive.error() == CancelError::NotActive && book.empty();

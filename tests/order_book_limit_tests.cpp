@@ -14,7 +14,7 @@ using marketlab::ExchangeEvent;
 using marketlab::Execution;
 using marketlab::EventSequence;
 using marketlab::InstrumentId;
-using marketlab::LimitResult;
+using marketlab::OrderResult;
 using marketlab::LogicalTime;
 using marketlab::MatchError;
 using marketlab::OrderAccepted;
@@ -39,7 +39,7 @@ AcceptedOrder make_order(std::uint64_t id, std::uint64_t sequence, Side side,
         LogicalTime{0}, RequestSequence{sequence}};
 }
 
-bool valid_stream(const LimitResult& result, const AcceptedOrder& incoming, std::uint64_t first) {
+bool valid_stream(const OrderResult& result, const AcceptedOrder& incoming, std::uint64_t first) {
     if (result.events.empty()) {
         return false;
     }
@@ -101,7 +101,7 @@ bool test_level_walk() {
             }
             auto incoming = make_order(99, 6, side, 100 + direction, units);
             incoming.participant_id = first.participant_id; // Include permitted self-matching.
-            const auto result = book.process_limit(incoming, EventSequence{100});
+            const auto result = book.process_order(incoming, EventSequence{100});
             const std::size_t matches = units <= 3 ? 1 : units <= 8 ? 2 : 3;
             const auto final_remaining = Quantity::from_units(units > 15 ? units - 15 : 0).value();
             if (!result || result->remaining_quantity != final_remaining ||
@@ -160,7 +160,7 @@ bool test_level_walk() {
             }
             auto stale = incoming;
             stale.order_id = {98};
-            const auto stale_result = book.process_limit(stale, {200});
+            const auto stale_result = book.process_order(stale, {200});
             if (stale_result || stale_result.error() != MatchError::OutOfOrder) {
                 std::cerr << "successful processing did not advance arrival priority\n";
                 return false;
@@ -182,14 +182,14 @@ bool test_capacity_and_validation() {
             }
             const auto* before = side == Side::Buy ? book.best_ask() : book.best_bid();
             const std::uint64_t events = units <= 5 ? 4 : 5;
-            const auto failure = book.process_limit(incoming, {maximum - events + 2});
+            const auto failure = book.process_order(incoming, {maximum - events + 2});
             if (failure || failure.error() != MatchError::EventSequenceExhausted || book.order_count() != 1 ||
                 (side == Side::Buy ? book.best_ask() : book.best_bid()) != before ||
                 before->remaining_quantity.units() != 5 || !book.contains(resting.order_id) || book.contains(incoming.order_id)) {
                 std::cerr << "event-counter exhaustion changed the book\n";
                 return false;
             }
-            const auto result = book.process_limit(incoming, {maximum - events + 1});
+            const auto result = book.process_order(incoming, {maximum - events + 1});
             if (!result || result->events.size() != events || !valid_stream(*result, incoming, maximum - events + 1)) {
                 std::cerr << "exact event capacity was not usable\n";
                 return false;
@@ -198,11 +198,11 @@ bool test_capacity_and_validation() {
         OrderBook empty{InstrumentId{1}};
         const auto incoming = make_order(2, maximum, side, std::numeric_limits<std::int64_t>::max(),
             std::numeric_limits<std::int64_t>::max());
-        const auto failure = empty.process_limit(incoming, {maximum});
+        const auto failure = empty.process_order(incoming, {maximum});
         if (failure || failure.error() != MatchError::EventSequenceExhausted || !empty.empty()) {
             return false;
         }
-        const auto result = empty.process_limit(incoming, {maximum - 1});
+        const auto result = empty.process_order(incoming, {maximum - 1});
         if (!result || result->events.size() != 2 || result->remaining_quantity != incoming.original_quantity ||
             !valid_stream(*result, incoming, maximum - 1) || !empty.contains(incoming.order_id)) {
             std::cerr << "non-crossing limit did not rest at numeric boundaries\n";
@@ -216,7 +216,7 @@ bool test_capacity_and_validation() {
     }
     const auto candidate = make_order(2, 2, Side::Buy, 100, 5);
     const auto expect_error = [&](const AcceptedOrder& incoming, EventSequence sequence, MatchError error) {
-        const auto result = guarded.process_limit(incoming, sequence);
+        const auto result = guarded.process_order(incoming, sequence);
         return !result && result.error() == error && guarded.order_count() == 1 &&
             guarded.best_ask()->remaining_quantity.units() == 5 && !guarded.best_bid();
     };
@@ -231,7 +231,7 @@ bool test_capacity_and_validation() {
         case 5: invalid.arrival_sequence = {}; break;
         case 6: invalid.original_quantity = Quantity::from_units(0).value(); break;
         case 7: invalid.type = static_cast<OrderType>(3); break;
-        case 8: invalid.type = OrderType::Market; invalid.limit_price.reset(); break;
+        case 8: invalid.type = OrderType::Market; break;
         }
         if (!expect_error(invalid, {1}, MatchError::InvalidOrder)) {
             return false;
@@ -249,7 +249,7 @@ bool test_capacity_and_validation() {
         !expect_error(candidate, {}, MatchError::InvalidEventSequence)) {
         return false;
     }
-    return guarded.process_limit(candidate, {1}).has_value();
+    return guarded.process_order(candidate, {1}).has_value();
 }
 
 bool test_quantity_boundaries() {
@@ -265,7 +265,7 @@ bool test_quantity_boundaries() {
                 book.insert_passive({second, second.original_quantity}) != PassiveInsertResult::Inserted) {
                 return false;
             }
-            const auto result = book.process_limit(incoming, {1});
+            const auto result = book.process_order(incoming, {1});
             const auto* head = side == Side::Buy ? book.best_ask() : book.best_bid();
             if (!result || result->events.size() != 7 || result->remaining_quantity.units() != 0 ||
                 !valid_stream(*result, incoming, 1) ||

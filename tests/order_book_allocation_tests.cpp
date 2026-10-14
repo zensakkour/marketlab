@@ -1,14 +1,18 @@
+#include <marketlab/exchange.hpp>
 #include <marketlab/order_book.hpp>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <new>
+#include <optional>
+#include <variant>
 
 namespace {
 
-// Fail one allocation at a chosen point inside a book operation, never during setup.
+// Fail one allocation at a chosen point inside a book/exchange operation, never during setup.
 std::ptrdiff_t allocations_before_failure = -1;
 
 } // namespace
@@ -43,7 +47,243 @@ void operator delete[](void* allocation, std::size_t) noexcept {
     ::operator delete(allocation);
 }
 
-bool test_limit_allocations() {
+bool test_exchange_cancel_allocations() {
+    using marketlab::CancelRejected;
+    using marketlab::CancelRequest;
+    using marketlab::Exchange;
+    using marketlab::Instrument;
+    using marketlab::OrderCancelled;
+    using marketlab::OrderRejected;
+    using marketlab::OrderRequest;
+    using marketlab::OrderType;
+    using marketlab::ParticipantId;
+    using marketlab::RejectionReason;
+    using marketlab::Side;
+    using marketlab::TickSize;
+    const std::array participants{ParticipantId{1}, ParticipantId{2}};
+    const auto tick = TickSize::from_decimal(1, 2).value();
+    struct Case {
+        CancelRequest request;
+        std::optional<RejectionReason> reason;
+    };
+    const std::array cases{
+        Case{{{20}, {1}, {1}, {1}}, std::nullopt},
+        Case{{{20}, {1}, {1}, {2}}, std::nullopt},
+        Case{{{20}, {1}, {1}, {4}}, std::nullopt},
+        Case{{{9}, {0}, {0}, {0}}, RejectionReason::InvalidTimestamp},
+        Case{{{20}, {99}, {0}, {0}}, RejectionReason::InvalidInstrument},
+        Case{{{20}, {1}, {99}, {0}}, RejectionReason::InvalidParticipant},
+        Case{{{20}, {1}, {1}, {0}}, RejectionReason::InvalidOrderId},
+        Case{{{20}, {1}, {2}, {99}}, RejectionReason::NotActive},
+        Case{{{20}, {1}, {2}, {2}}, RejectionReason::NotOwner},
+    };
+    for (const auto side : {Side::Buy, Side::Sell}) {
+        for (const auto& test : cases) {
+            // One allocation prepares the single output event; no later allocation is allowed.
+            for (const std::ptrdiff_t fault : {0, 1}) {
+                Exchange exchange{Instrument{{1}, "XYZ", tick}, participants};
+                const auto worse = side == Side::Buy ? 99 : 101;
+                for (std::uint64_t id = 1; id <= 4; ++id) {
+                    const OrderRequest order{{10}, {1}, {1}, {id}, side, OrderType::Limit, 3, id == 4 ? worse : 100};
+                    if (!exchange.process_order(order)) {
+                        return false;
+                    }
+                }
+                const OrderRequest fill{{10}, {1}, {2}, {5}, side == Side::Buy ? Side::Sell : Side::Buy,
+                    OrderType::Limit, 1, 100};
+                if (!exchange.process_order(fill)) {
+                    return false;
+                }
+                const auto before_request = exchange.last_request_sequence();
+                const auto before_event = exchange.last_event_sequence();
+                const auto* bid = exchange.book().best_bid();
+                const auto* ask = exchange.book().best_ask();
+                const auto time = test.reason == RejectionReason::InvalidTimestamp ? 10U : 20U;
+                const auto verify = [&](const auto& result) {
+                    if (!result || result->size() != 1 || !marketlab::is_valid(result->front()) ||
+                        exchange.last_request_sequence().value != before_request.value + 1 ||
+                        exchange.last_event_sequence().value != before_event.value + 1 ||
+                        exchange.current_time().nanoseconds != time ||
+                        exchange.book().order_count() != (test.reason ? 4U : 3U)) {
+                        return false;
+                    }
+                    const auto* cancelled = std::get_if<OrderCancelled>(&result->front());
+                    const auto* rejected = std::get_if<CancelRejected>(&result->front());
+                    const auto* header = cancelled ? &cancelled->header : rejected ? &rejected->header : nullptr;
+                    if (!header || header->timestamp.nanoseconds != time ||
+                        header->instrument_id != test.request.instrument_id ||
+                        header->request_sequence.value != before_request.value + 1 ||
+                        header->event_sequence.value != before_event.value + 1) {
+                        return false;
+                    }
+                    if (test.reason) {
+                        return rejected && rejected->reason == *test.reason &&
+                            rejected->request.target_order_id == test.request.target_order_id &&
+                            rejected->request.participant_id == test.request.participant_id;
+                    }
+                    return cancelled && cancelled->order_id == test.request.target_order_id &&
+                        cancelled->participant_id == test.request.participant_id &&
+                        cancelled->price.ticks() == (test.request.target_order_id.value == 4 ? worse : 100) &&
+                        cancelled->cancelled_quantity.units() == (test.request.target_order_id.value == 1 ? 2 : 3) &&
+                        !exchange.book().find(test.request.target_order_id);
+                };
+                bool failed = false;
+                allocations_before_failure = fault;
+                try {
+                    const auto result = exchange.process_cancel(test.request);
+                    allocations_before_failure = -1;
+                    if (!verify(result)) {
+                        return false;
+                    }
+                } catch (const std::bad_alloc&) {
+                    allocations_before_failure = -1;
+                    failed = true;
+                }
+                if (failed != (fault == 0)) {
+                    return false;
+                }
+                if (failed) {
+                    if (exchange.current_time().nanoseconds != 10 || exchange.last_request_sequence() != before_request ||
+                        exchange.last_event_sequence() != before_event || exchange.book().order_count() != 4 ||
+                        exchange.book().best_bid() != bid || exchange.book().best_ask() != ask) {
+                        return false;
+                    }
+                    for (std::uint64_t id = 1; id <= 4; ++id) {
+                        const auto* resting = exchange.book().find({id});
+                        if (!resting || resting->remaining_quantity.units() != (id == 1 ? 2 : 3) ||
+                            resting->order.arrival_sequence.value != id || resting->order.original_quantity.units() != 3) {
+                            return false;
+                        }
+                    }
+                    if (!verify(exchange.process_cancel(test.request))) {
+                        return false;
+                    }
+                }
+                const OrderRequest duplicate{{time}, {1}, {2}, {1}, side, OrderType::Limit, 1, 100};
+                const auto result = exchange.process_order(duplicate);
+                const auto* rejection = result ? std::get_if<OrderRejected>(&result->front()) : nullptr;
+                if (!rejection || rejection->reason != RejectionReason::DuplicateOrderId) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+bool test_exchange_allocations() {
+    using marketlab::Exchange;
+    using marketlab::Instrument;
+    using marketlab::OrderAccepted;
+    using marketlab::OrderRejected;
+    using marketlab::OrderRequest;
+    using marketlab::OrderType;
+    using marketlab::ParticipantId;
+    using marketlab::RejectionReason;
+    using marketlab::Side;
+    using marketlab::TickSize;
+    const std::array participants{ParticipantId{1}, ParticipantId{2}};
+    const auto tick = TickSize::from_decimal(1, 2).value();
+    enum class Scenario { Rejected, PassiveLimit, CrossingLimit, Market };
+    for (const auto side : {Side::Buy, Side::Sell}) {
+        const auto opposite = side == Side::Buy ? Side::Sell : Side::Buy;
+        const int direction = side == Side::Buy ? 1 : -1;
+        for (const int existing : {0, 6}) {
+            for (const auto scenario : {Scenario::Rejected, Scenario::PassiveLimit, Scenario::CrossingLimit, Scenario::Market}) {
+                for (const int units : {2, 8, 12}) {
+                    for (std::ptrdiff_t fault = 0; ; ++fault) {
+                        Exchange exchange{Instrument{{1}, "XYZ", tick}, participants};
+                        const auto make_order = [](std::uint64_t id, Side order_side, int price, int quantity) {
+                            return OrderRequest{{0}, {1}, {1}, {id}, order_side, OrderType::Limit, quantity, price};
+                        };
+                        for (int index = 0; index < existing; ++index) {
+                            if (!exchange.process_order(make_order(static_cast<std::uint64_t>(index + 1), side, 100, 5))) {
+                                return false;
+                            }
+                        }
+                        if (!exchange.process_order(make_order(10, opposite, 100 + direction, 3)) ||
+                            !exchange.process_order(make_order(11, opposite, 100 + 2 * direction, 5))) {
+                            return false;
+                        }
+                        const bool crossing = scenario == Scenario::CrossingLimit || scenario == Scenario::Market;
+                        auto request = make_order(50, side, crossing ? 100 + 2 * direction : 100, units);
+                        request.timestamp = {20};
+                        request.participant_id = {2};
+                        if (scenario == Scenario::Market) {
+                            request.type = OrderType::Market;
+                            request.limit_price_ticks.reset();
+                        } else if (scenario == Scenario::Rejected) {
+                            request.quantity_units = 0;
+                        }
+                        const auto* bid = exchange.book().best_bid();
+                        const auto* ask = exchange.book().best_ask();
+                        const auto previous_request = exchange.last_request_sequence();
+                        const auto previous_event = exchange.last_event_sequence();
+                        const auto verify = [&](const auto& result) {
+                            const std::size_t matches = crossing ? (units <= 3 ? 1 : 2) : 0;
+                            const auto remaining = crossing ? (units > 8 ? units - 8 : 0) : units;
+                            const bool rested = scenario != Scenario::Rejected && scenario != Scenario::Market && remaining > 0;
+                            const std::size_t events = scenario == Scenario::Rejected ? 1 :
+                                1 + 3 * matches + (remaining > 0 ? 1 : 0);
+                            if (!result || result->size() != events ||
+                                exchange.last_request_sequence().value != previous_request.value + 1 ||
+                                exchange.last_event_sequence().value != previous_event.value + events ||
+                                exchange.current_time().nanoseconds != 20 ||
+                                exchange.book().contains(request.order_id) != rested ||
+                                exchange.book().order_count() != static_cast<std::size_t>(existing) +
+                                    (crossing ? (units < 3 ? 2 : units < 8 ? 1 : 0) : 2) + (rested ? 1 : 0)) {
+                                return false;
+                            }
+                            for (const auto& event : *result) {
+                                if (!marketlab::is_valid(event)) return false;
+                            }
+                            if (scenario == Scenario::Rejected) {
+                                const auto* rejected = std::get_if<OrderRejected>(&result->front());
+                                return rejected && rejected->reason == RejectionReason::InvalidQuantity;
+                            }
+                            return std::holds_alternative<OrderAccepted>(result->front());
+                        };
+                        bool failed = false;
+                        allocations_before_failure = fault;
+                        try {
+                            const auto result = exchange.process_order(request);
+                            allocations_before_failure = -1;
+                            if (!verify(result)) return false;
+                        } catch (const std::bad_alloc&) {
+                            allocations_before_failure = -1;
+                            failed = true;
+                        }
+                        if (failed) {
+                            const auto* first = exchange.book().find({10});
+                            const auto* second = exchange.book().find({11});
+                            if (exchange.current_time().nanoseconds != 0 ||
+                                exchange.last_request_sequence() != previous_request || exchange.last_event_sequence() != previous_event ||
+                                exchange.book().order_count() != static_cast<std::size_t>(existing + 2) ||
+                                exchange.book().best_bid() != bid || exchange.book().best_ask() != ask ||
+                                !first || !second || first->remaining_quantity.units() != 3 || second->remaining_quantity.units() != 5 ||
+                                exchange.book().contains(request.order_id) || !verify(exchange.process_order(request))) {
+                                return false;
+                            }
+                        }
+                        if (scenario == Scenario::Rejected) {
+                            request.quantity_units = units;
+                            const auto corrected = exchange.process_order(request);
+                            if (!corrected || !std::holds_alternative<OrderAccepted>(corrected->front())) return false;
+                        } else {
+                            const auto duplicate = exchange.process_order(request);
+                            const auto* rejection = duplicate ? std::get_if<OrderRejected>(&duplicate->front()) : nullptr;
+                            if (!rejection || rejection->reason != RejectionReason::DuplicateOrderId) return false;
+                        }
+                        if (!failed) break;
+                    }
+                }
+            }
+        }
+    }
+    return true;
+}
+
+bool test_order_allocations() {
     using marketlab::AcceptedOrder;
     using marketlab::InstrumentId;
     using marketlab::OrderBook;
@@ -57,11 +297,14 @@ bool test_limit_allocations() {
             .side = side, .type = OrderType::Limit, .original_quantity = Quantity::from_units(units).value(),
             .limit_price = Price::from_ticks(price).value(), .accepted_at = {0}, .arrival_sequence = {id}};
     };
+    enum class Scenario { PassiveLimit, CrossingLimit, Market };
     for (const auto side : {Side::Buy, Side::Sell}) {
         const auto opposite = side == Side::Buy ? Side::Sell : Side::Buy;
         const int direction = side == Side::Buy ? 1 : -1;
         for (const int existing : {0, 5, 6, 7}) {
-            for (const bool crossing : {false, true}) {
+            for (const auto scenario : {Scenario::PassiveLimit, Scenario::CrossingLimit, Scenario::Market}) {
+                const bool crossing = scenario != Scenario::PassiveLimit;
+                const bool market = scenario == Scenario::Market;
                 for (const int units : {2, 8, 12}) {
                     for (std::ptrdiff_t fault = 0; ; ++fault) {
                         OrderBook book{InstrumentId{1}};
@@ -77,21 +320,26 @@ bool test_limit_allocations() {
                             book.insert_passive({second, second.original_quantity}) != PassiveInsertResult::Inserted) {
                             return false;
                         }
-                        const auto incoming = make_order(20, side, crossing ? 100 + 2 * direction : 100, units);
+                        auto incoming = make_order(20, side, crossing ? 100 + 2 * direction : 100, units);
+                        if (market) {
+                            incoming.type = OrderType::Market;
+                            incoming.limit_price.reset();
+                        }
                         const auto* original_bid = book.best_bid();
                         const auto* original_ask = book.best_ask();
                         bool failed = false;
                         allocations_before_failure = fault;
                         try {
-                            const auto result = book.process_limit(incoming, {100});
+                            const auto result = book.process_order(incoming, {100});
                             allocations_before_failure = -1;
                             const auto remaining = crossing ? (units > 8 ? units - 8 : 0) : units;
+                            const bool rested = remaining > 0 && !market;
                             const std::size_t executions = crossing ? (units <= 3 ? 1 : 2) : 0;
                             if (!result || result->remaining_quantity.units() != remaining ||
                                 result->events.size() != 1 + 3 * executions + (remaining > 0 ? 1 : 0) ||
-                                book.contains(incoming.order_id) != (remaining > 0) ||
+                                book.contains(incoming.order_id) != rested ||
                                 book.order_count() != static_cast<std::size_t>(existing) +
-                                    (crossing ? (units < 3 ? 2 : units < 8 ? 1 : 0) : 2) + (remaining > 0 ? 1 : 0)) {
+                                    (crossing ? (units < 3 ? 2 : units < 8 ? 1 : 0) : 2) + (rested ? 1 : 0)) {
                                 return false;
                             }
                         } catch (const std::bad_alloc&) {
@@ -106,15 +354,15 @@ bool test_limit_allocations() {
                             (side == Side::Buy ? book.best_ask() : book.best_bid())->remaining_quantity.units() != 3 ||
                             (existing && (side == Side::Buy ? book.best_bid() : book.best_ask())->remaining_quantity.units() != 5) ||
                             book.contains(incoming.order_id) || !book.contains(first.order_id) || !book.contains(second.order_id)) {
-                            std::cerr << "limit allocation failure changed active state\n";
+                            std::cerr << "order allocation failure changed active state\n";
                             return false;
                         }
                         // Retrying the identical accepted order checks ID/priority rollback
                         // and exposes any partial liquidity consumption beyond the first head.
-                        const auto retry = book.process_limit(incoming, {100});
+                        const auto retry = book.process_order(incoming, {100});
                         const auto remaining = crossing ? (units > 8 ? units - 8 : 0) : units;
                         if (!retry || retry->remaining_quantity.units() != remaining) {
-                            std::cerr << "limit allocation failure prevented an identical retry\n";
+                            std::cerr << "order allocation failure prevented an identical retry\n";
                             return false;
                         }
                     }
@@ -182,10 +430,18 @@ bool test_cancel_allocations() {
 }
 
 int main() {
+    if (!test_exchange_cancel_allocations()) {
+        std::cerr << "exchange cancellation allocation failure changed state or prevented retry\n";
+        return 1;
+    }
+    if (!test_exchange_allocations()) {
+        std::cerr << "exchange allocation failure changed state or prevented retry\n";
+        return 1;
+    }
     if (!test_cancel_allocations()) {
         return 1;
     }
-    if (!test_limit_allocations()) {
+    if (!test_order_allocations()) {
         return 1;
     }
     using marketlab::AcceptedOrder;

@@ -62,7 +62,7 @@ struct SingleMatch {
     Quantity resting_remaining;
 };
 
-struct LimitResult {
+struct OrderResult {
     std::vector<ExchangeEvent> events;
     Quantity remaining_quantity;
 };
@@ -154,7 +154,7 @@ public:
         if (const auto error = validate_match_input(incoming, remaining)) {
             return std::unexpected{*error};
         }
-        return preview_limit(incoming, remaining).count;
+        return preview_order(incoming, remaining).count;
     }
 
     // Match one accepted limit remainder. A value contains a match or is empty
@@ -182,17 +182,17 @@ public:
         return match_at(incoming, remaining, execution_sequence, levels, level);
     }
 
-    // Process a trusted accepted limit; exchange registration, clock, and lifetime
+    // Process a trusted accepted order; exchange registration, clock, and lifetime
     // ID checks belong to the caller. All potentially failing work precedes fills.
-    [[nodiscard]] std::expected<LimitResult, MatchError> process_limit(
+    [[nodiscard]] std::expected<OrderResult, MatchError> process_order(
         const AcceptedOrder& incoming, EventSequence first_event_sequence) {
-        if (const auto error = validate_match_input(incoming, incoming.original_quantity)) {
+        if (const auto error = validate_order_input(incoming, incoming.original_quantity)) {
             return std::unexpected{*error};
         }
         if (!is_valid(first_event_sequence)) {
             return std::unexpected{MatchError::InvalidEventSequence};
         }
-        const auto preview = preview_limit(incoming, incoming.original_quantity);
+        const auto preview = preview_order(incoming, incoming.original_quantity);
         const std::size_t final_events = preview.remaining.units() == 0 ? 1 : 2;
         if (preview.count > (std::numeric_limits<std::size_t>::max() - final_events) / 3) {
             return std::unexpected{MatchError::OutputCapacityExceeded};
@@ -202,7 +202,7 @@ public:
                 std::numeric_limits<std::uint64_t>::max() - first_event_sequence.value)) {
             return std::unexpected{MatchError::EventSequenceExhausted};
         }
-        LimitResult result{{}, preview.remaining};
+        OrderResult result{{}, preview.remaining};
         if (event_count > result.events.max_size()) {
             return std::unexpected{MatchError::OutputCapacityExceeded};
         }
@@ -214,14 +214,14 @@ public:
         };
         result.events.emplace_back(OrderAccepted{header(), incoming});
 
-        // The positive remainder can allocate. Store it before consuming opposite
+        // A positive limit remainder can allocate. Store it before consuming opposite
         // liquidity; no observer or callback can see this temporary crossed state.
-        if (preview.remaining.units() != 0) {
+        if (incoming.type == OrderType::Limit && preview.remaining.units() != 0) {
             store_passive({incoming, preview.remaining});
         }
         static_assert(std::is_nothrow_copy_constructible_v<ExchangeEvent>);
         static_assert(std::is_nothrow_move_constructible_v<ExchangeEvent>);
-        static_assert(std::is_nothrow_constructible_v<std::expected<LimitResult, MatchError>, LimitResult&&>);
+        static_assert(std::is_nothrow_constructible_v<std::expected<OrderResult, MatchError>, OrderResult&&>);
         auto remaining = incoming.original_quantity;
         auto& levels = incoming.side == Side::Buy ? asks_ : bids_;
         for (std::size_t index = 0; index < preview.count; ++index) {
@@ -247,8 +247,13 @@ public:
             }
         }
         if (preview.remaining.units() != 0) {
-            result.events.emplace_back(OrderRested{header(), incoming.order_id,
-                incoming.participant_id, *incoming.limit_price, preview.remaining});
+            if (incoming.type == OrderType::Limit) {
+                result.events.emplace_back(OrderRested{header(), incoming.order_id,
+                    incoming.participant_id, *incoming.limit_price, preview.remaining});
+            } else {
+                result.events.emplace_back(MarketRemainderExpired{header(), incoming.order_id,
+                    incoming.participant_id, preview.remaining});
+            }
         }
         last_arrival_sequence_ = incoming.arrival_sequence;
         return result;
@@ -309,18 +314,19 @@ public:
 private:
     using PriceLevels = std::map<Price, std::deque<RestingOrder>>;
 
-    struct LimitPreview {
+    struct MatchPreview {
         std::size_t count;
         Quantity remaining;
     };
 
-    [[nodiscard]] LimitPreview preview_limit(const AcceptedOrder& incoming, Quantity remaining) const {
+    [[nodiscard]] MatchPreview preview_order(const AcceptedOrder& incoming, Quantity remaining) const {
         const bool incoming_buy = incoming.side == Side::Buy;
         const auto& levels = incoming_buy ? asks_ : bids_;
         std::size_t count = 0;
         const auto count_level = [&](const auto& level) {
-            if ((incoming_buy && level.first > *incoming.limit_price) ||
-                (!incoming_buy && level.first < *incoming.limit_price)) {
+            if (incoming.limit_price &&
+                ((incoming_buy && level.first > *incoming.limit_price) ||
+                 (!incoming_buy && level.first < *incoming.limit_price))) {
                 return false;
             }
             for (const auto& resting : level.second) {
@@ -415,7 +421,15 @@ private:
 
     [[nodiscard]] std::optional<MatchError> validate_match_input(
         const AcceptedOrder& incoming, Quantity remaining) const {
-        if (!is_valid(incoming) || incoming.type != OrderType::Limit) {
+        if (incoming.type != OrderType::Limit) {
+            return MatchError::InvalidOrder;
+        }
+        return validate_order_input(incoming, remaining);
+    }
+
+    [[nodiscard]] std::optional<MatchError> validate_order_input(
+        const AcceptedOrder& incoming, Quantity remaining) const {
+        if (!is_valid(incoming)) {
             return MatchError::InvalidOrder;
         }
         if (!is_valid_order_quantity(remaining) || remaining > incoming.original_quantity) {
