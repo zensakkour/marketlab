@@ -483,10 +483,17 @@ event order; payload fields omitted here are determined by sections 1-10.
 | Duplicate active ID | B[b1@100:2] | ID b1: sell limit 100, qty 1 | Rejected(DuplicateOrderId) | B[b1@100:2] |
 | Duplicate terminal ID | empty; b1 previously accepted and cancelled | ID b1: buy limit 100, qty 1 | Rejected(DuplicateOrderId) | empty |
 
-The examples specify expected outcomes; they are not executable matching tests
-yet. Boundary tests must also cover both sides, invalid enum values, ID zero,
-unknown configuration, price/quantity maxima, partial-fill priority retention,
-equal-timestamp arrival order, validation precedence, and counter exhaustion.
+All 23 rows are executable in `tests/exchange_scenario_tests.cpp`, registered as
+`exchange_scenario` with CTest. Each scenario creates a fresh exchange, prepares
+its starting state through raw requests, and compares the entire ordered event
+stream and final book to explicit expectations. Checks include full payloads and
+metadata, best/FIFO heads, all expected active records with original acceptance
+priority, final time/counters, and unchanged previously returned event buffers.
+
+The existing request/book/exchange tests add both-side and boundary coverage for
+invalid enums, zero/unknown IDs, price/quantity maxima, partial-fill priority,
+equal timestamps, validation precedence, and counter capacity. The canonical suite
+does not replace the remaining full book-invariant and generated-workload gates.
 
 ## Specification review
 

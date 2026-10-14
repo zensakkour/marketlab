@@ -209,11 +209,18 @@ build files; building compiles the test executables; CTest runs them. Tests are
 enabled explicitly, and compiler warnings are treated as errors.
 
 A successful test run ends with `100% tests passed, 0 tests failed`.
-Currently there are thirteen registered tests: `price`, `domain`, `requests`, `orders`,
+Currently there are fourteen registered tests: `price`, `domain`, `requests`, `orders`,
 `events`, `simulation`, `order_book`, `order_book_allocation`, `order_book_matching`,
-`order_book_limit`, `order_book_cancel`, `order_book_market`, and `exchange`.
+`order_book_limit`, `order_book_cancel`, `order_book_market`, `exchange`, and
+`exchange_scenario`.
 `--output-on-failure` prints diagnostics from failing tests, and CTest returns a
 nonzero exit code on failure.
+
+`exchange_scenario` runs all 23 canonical rows from the matching contract through
+the raw exchange entry points. It checks complete ordered event records, final
+active orders and FIFO heads, original order metadata, time/counters, and preserved
+previously returned events. The existing tests retain boundary and allocation-failure
+coverage; the full invariant and generated-workload gates remain future work.
 
 After editing C++ code, rerun the build and CTest commands. Rerun configuration
 after changing `CMakeLists.txt` or build options.
@@ -263,6 +270,8 @@ $LASTEXITCODE
 $LASTEXITCODE
 .\build\debug\exchange_tests.exe
 $LASTEXITCODE
+.\build\debug\exchange_scenario_tests.exe
+$LASTEXITCODE
 ```
 
 In a Unix shell:
@@ -294,6 +303,8 @@ echo $?
 echo $?
 ./build/debug/exchange_tests
 echo $?
+./build/debug/exchange_scenario_tests
+echo $?
 ```
 
 Each test is silent on success and returns exit code `0`. On failure it prints a
@@ -312,12 +323,12 @@ ctest --test-dir build/release --output-on-failure
 ### GCC checked-container tests
 
 GCC/libstdc++ can also check container and iterator operations at runtime in a
-separate build. These commands build and run the seven book/exchange tests:
+separate build. These commands build and run the eight book/exchange tests:
 
 ```powershell
 cmake -S . -B build/checked -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DCMAKE_CXX_FLAGS=-D_GLIBCXX_DEBUG
-cmake --build build/checked --target order_book_tests order_book_allocation_tests order_book_matching_tests order_book_limit_tests order_book_cancel_tests order_book_market_tests exchange_tests
-ctest --test-dir build/checked --output-on-failure -R "^(order_book(_allocation|_matching|_limit|_cancel|_market)?|exchange)$"
+cmake --build build/checked --target order_book_tests order_book_allocation_tests order_book_matching_tests order_book_limit_tests order_book_cancel_tests order_book_market_tests exchange_tests exchange_scenario_tests
+ctest --test-dir build/checked --output-on-failure -R "^(order_book(_allocation|_matching|_limit|_cancel|_market)?|exchange(_scenario)?)$"
 ```
 
 Keep this build separate: the flag changes standard-container layouts, so code
