@@ -92,6 +92,8 @@ void test_reads_and_refusals_do_not_allocate() {
     const auto missing = ledger.account({99});
     const auto position = account->position();
     const auto cash = account->cash_flow();
+    const auto notional = CashAmount::from_aggregate(Price::from_ticks(100).value(), position.magnitude);
+    const auto pnl = account->total_pnl(Price::from_ticks(101).value());
     const auto history = ledger.history();
     const auto last = ledger.last_event_sequence();
     const auto empty = ledger.apply({});
@@ -100,6 +102,7 @@ void test_reads_and_refusals_do_not_allocate() {
     allocations_before_failure = -1;
     require(instrument.value == 1 && account == account_at_100(5, 0) && !missing &&
         position == NetPosition{false, {0, 5}} && cash == NetCashFlow{true, {0, 0, 500}} &&
+        notional == CashAmount{0, 0, 500} && pnl == TotalPnl{false, {0, 0, 5}} &&
         history.size() == 1 && history.data() == borrowed &&
         last.value == 2 && empty && !duplicate && duplicate.error() == AccountingError::OutOfOrder &&
         !refused && refused.error() == AccountingError::UnknownParticipant && ledger.history().size() == 1,

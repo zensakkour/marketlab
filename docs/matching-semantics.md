@@ -20,8 +20,9 @@ IDs. Symbols are retained as supplied without case conversion or trimming.
 The v0 domain represents participants through `ParticipantId`. A separate
 participant object is not required to identify order owners or execution
 counterparties. Registration belongs to exchange configuration; participant
-behavior and PnL are later components; execution-based quantity and cash-flow
-accounting is implemented by the separate `ParticipantLedger`.
+behavior and realised/unrealised PnL decomposition are later components;
+execution-based quantity/cash accounting and explicitly marked total PnL are
+implemented by the separate `ParticipantLedger`.
 
 The submitting participant supplies an order ID. Accepted order IDs are unique
 across the exchange instance for its entire lifetime, including filled,
@@ -309,7 +310,9 @@ complete execution batches with rollback
 on refusal/allocation failure, and supports reconstruction from retained history.
 Cash starts from zero in exact tick-times-quantity units, with buys debiting and
 sales crediting; self-matches have zero net cash effect. Negative cash is allowed,
-with no funding/solvency checks or fees. PnL remains future work. See
+with no funding/solvency checks or fees. Total PnL is read-only cash plus net
+position times an explicit caller-supplied price; realised/unrealised decomposition
+remains future work. See
 [participant-accounting.md](participant-accounting.md)
 for ownership, delivery ordering, retry behavior and current scope.
 

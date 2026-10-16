@@ -22,6 +22,10 @@ static_assert(short_one.position() == NetPosition{true, {0, 1}});
 static_assert(noexcept(flat.position()));
 static_assert(noexcept(flat.cash_flow()));
 static_assert(flat.cash_flow() == NetCashFlow{});
+constexpr auto mark_100 = Price::from_ticks(100).value();
+static_assert(flat.total_pnl(mark_100) == TotalPnl{});
+static_assert(noexcept(flat.total_pnl(mark_100)));
+static_assert(!std::is_convertible_v<TotalPnl, NetCashFlow>);
 static_assert(!std::is_convertible_v<NetPosition, Quantity>);
 static_assert(std::is_same_v<decltype(std::declval<const ParticipantLedger&>().history()), std::span<const Execution>>);
 static_assert(!std::is_copy_constructible_v<ParticipantLedger>);
@@ -146,6 +150,10 @@ void test_large_volumes_and_final_sequence() {
     require(saved.buy_volume == expected && saved.position() == NetPosition{false, expected} &&
         ledger.account({2})->position() == NetPosition{true, expected} &&
         marketlab::to_string(expected) == "27670116110564327421", "large position narrowed or wrapped");
+    const auto notional = CashAmount::from_aggregate(Price::from_ticks(100).value(), saved.position().magnitude);
+    require(notional == saved.buy_notional && saved.cash_flow() == NetCashFlow{true, notional} &&
+        marketlab::to_string(notional) == "2767011611056432742100",
+        "aggregate notional narrowed a real cumulative position");
     auto last = trade(std::numeric_limits<std::uint64_t>::max(), std::numeric_limits<std::uint64_t>::max(),
         std::numeric_limits<std::uint64_t>::max(), maximum, 1, 1);
     last.price = Price::from_ticks(maximum).value();
@@ -161,6 +169,64 @@ void test_large_volumes_and_final_sequence() {
     ParticipantLedger replay{{1}, participants};
     require(replay.apply(ledger.history()).has_value(), "large-history replay failed");
     check_same(ledger, replay);
+}
+
+void test_total_pnl() {
+    ParticipantLedger ledger{{1}, participants};
+    const auto check = [&](std::int64_t ticks, bool negative, std::uint64_t magnitude) {
+        const auto mark = Price::from_ticks(ticks).value();
+        const auto buyer = ledger.account({1})->total_pnl(mark);
+        const auto seller = ledger.account({2})->total_pnl(mark);
+        require(buyer == TotalPnl{negative && magnitude != 0, {0, 0, magnitude}} &&
+            seller == TotalPnl{!negative && magnitude != 0, {0, 0, magnitude}} &&
+            ledger.account({3})->total_pnl(mark) == TotalPnl{}, "marked participant PnL differs");
+    };
+    auto first = trade(1, 1, 1, 5);
+    require(ledger.apply(std::span{&first, 1}).has_value(), "PnL opening trade failed");
+    check(104, false, 20);
+    check(96, true, 20);
+    check(100, false, 0);
+    auto partial = trade(2, 2, 2, 2, 2, 1);
+    partial.price = Price::from_ticks(104).value();
+    require(ledger.apply(std::span{&partial, 1}).has_value(), "PnL partial close failed");
+    check(104, false, 20);
+    auto close = trade(3, 3, 3, 3, 2, 1);
+    close.price = partial.price;
+    require(ledger.apply(std::span{&close, 1}).has_value(), "PnL complete close failed");
+    check(1, false, 20);
+    check(std::numeric_limits<std::int64_t>::max(), false, 20);
+    auto reversal = trade(4, 4, 4, 2, 2, 1);
+    reversal.price = partial.price;
+    require(ledger.apply(std::span{&reversal, 1}).has_value(), "PnL short reversal failed");
+    check(103, false, 22);
+    auto self = trade(5, 5, 5, 9, 1, 1);
+    self.price = Price::from_ticks(1000).value();
+    require(ledger.apply(std::span{&self, 1}).has_value(), "PnL self-match failed");
+    const auto saved = ledger.account({1});
+    const auto* history = ledger.history().data();
+    check(103, false, 22);
+    check(115, true, 2);
+    require(ledger.account({1}) == saved && ledger.history().data() == history &&
+        ledger.history().size() == 5 && ledger.last_event_sequence().value == 5,
+        "valuation changed accounting or history");
+    ParticipantLedger rebuilt{{1}, participants};
+    require(rebuilt.apply(ledger.history()).has_value() &&
+        rebuilt.account({1})->total_pnl(mark_100) == ledger.account({1})->total_pnl(mark_100),
+        "reconstructed PnL differs");
+
+    // Both signed terms may reinforce one another for a profitable long or losing short.
+    const ParticipantAccount profitable_long{{0, 2}, {0, 1}, {0, 0, 2}, {0, 0, 100}};
+    const ParticipantAccount losing_short{{0, 1}, {0, 2}, {0, 0, 100}, {0, 0, 2}};
+    require(profitable_long.total_pnl(mark_100) == TotalPnl{false, {0, 0, 198}} &&
+        losing_short.total_pnl(mark_100) == TotalPnl{true, {0, 0, 198}}, "same-sign PnL terms differ");
+    constexpr auto maximum = std::numeric_limits<std::uint64_t>::max();
+    const CashAmount full{maximum, maximum, maximum};
+    const ParticipantAccount positive_overflow{{0, 1}, {}, {}, full};
+    const ParticipantAccount negative_overflow{{}, {0, 1}, full, {}};
+    const ParticipantAccount cancellation{{0, 1}, {}, full, {}};
+    require(!positive_overflow.total_pnl(mark_100) && !negative_overflow.total_pnl(mark_100) &&
+        cancellation.total_pnl(mark_100) == TotalPnl{true, {maximum, maximum, maximum - 100}},
+        "caller-created account overflow or signed cancellation differs");
 }
 
 void test_cash_flows() {
@@ -193,6 +259,13 @@ void test_cash_flows() {
         large.account({1})->cash_flow() == NetCashFlow{true, expected} &&
         large.account({2})->cash_flow() == NetCashFlow{false, expected},
         "cash flow narrowed or wrapped beyond 128 bits");
+    const auto maximum_mark = Price::from_ticks(maximum).value();
+    const auto low_mark = Price::from_ticks(1).value();
+    const auto loss = large.account({1})->total_pnl(low_mark);
+    require(large.account({1})->total_pnl(maximum_mark) == TotalPnl{} && loss && loss->negative &&
+        marketlab::to_string(loss->magnitude) == "425352958651173079190867678736888627210" &&
+        large.account({2})->total_pnl(low_mark) == TotalPnl{false, loss->magnitude},
+        "large total PnL narrowed or lost cancellation");
     auto final = trade(std::numeric_limits<std::uint64_t>::max(), 6, 6, maximum, 1, 1);
     final.price = Price::from_ticks(maximum).value();
     require(large.apply(std::span{&final, 1}).has_value() && large.account({1})->cash_flow() == NetCashFlow{true, expected},
@@ -205,6 +278,7 @@ void test_cash_flows() {
 int main() {
     try {
         test_cash_flows();
+        test_total_pnl();
         test_configuration();
         test_balances_and_replay();
         test_failed_batches();

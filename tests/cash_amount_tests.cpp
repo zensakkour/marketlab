@@ -43,6 +43,14 @@ static_assert(!CashAmount{std::uint64_t{1} << 63, 0, 0}.multiply(2));
 static_assert(!CashAmount{maximum / 3, maximum, 0}.multiply(3));
 static_assert(!CashAmount{maximum / 3, maximum / 3, maximum}.multiply(3));
 static_assert(noexcept(full.multiply(maximum)));
+static_assert(CashAmount::from_aggregate(Price::from_ticks(1).value(), {}) == CashAmount{});
+static_assert(CashAmount::from_aggregate(Price::from_ticks(1).value(), {maximum, maximum}) ==
+    CashAmount{0, maximum, maximum});
+static_assert(CashAmount::from_aggregate(Price::from_ticks(5).value(), {1, 0}) == CashAmount{0, 5, 0});
+static_assert(CashAmount::from_aggregate(Price::from_ticks(std::numeric_limits<std::int64_t>::max()).value(),
+    {maximum, maximum}) == CashAmount{0x7ffffffffffffffe, maximum, 0x8000000000000001});
+constexpr auto unit_price = Price::from_ticks(1).value();
+static_assert(noexcept(CashAmount::from_aggregate(unit_price, {})));
 static_assert(!std::is_convertible_v<CashAmount, marketlab::Quantity>);
 static_assert(CashAmount::from_trade(Price::from_ticks(3).value(), Quantity::from_units(5).value()) == CashAmount{0, 0, 15});
 
@@ -114,11 +122,28 @@ void test_scalar_products() {
     require(fitting > 3000 && overflowing > 3000, "cash scalar workload missed fitting or overflow cases");
 }
 
+void test_aggregate_products() {
+    std::mt19937_64 random{314159};
+    for (int index = 0; index < 10000; ++index) {
+        const marketlab::AggregateQuantity quantity{random(), random()};
+        const auto ticks = static_cast<std::int64_t>((random() >> 1) | 1);
+        const auto price = Price::from_ticks(ticks).value();
+        const auto product = CashAmount::from_aggregate(price, quantity);
+        require(marketlab::to_string(product) ==
+            decimal_product(marketlab::to_string(quantity), std::to_string(ticks)),
+            "aggregate price/quantity product differs from decimal oracle");
+        const auto bounded = Quantity::from_units(static_cast<std::int64_t>(random() >> 1)).value();
+        require(CashAmount::from_aggregate(price, {0, static_cast<std::uint64_t>(bounded.units())}) ==
+            CashAmount::from_trade(price, bounded), "aggregate and trade products disagree");
+    }
+}
+
 int main() {
     try {
         test_boundaries();
         test_generated_totals();
         test_scalar_products();
+        test_aggregate_products();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

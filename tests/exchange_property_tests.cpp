@@ -430,6 +430,9 @@ struct WorkloadResult {
 void check_accounts(const marketlab::ParticipantLedger& accounting, const Ledger& reference) {
     marketlab::CashAmount total_spent;
     marketlab::CashAmount total_received;
+    constexpr std::array<std::int64_t, 3> marks{1, 103, std::numeric_limits<std::int64_t>::max()};
+    std::array<marketlab::CashAmount, marks.size()> gains{};
+    std::array<marketlab::CashAmount, marks.size()> losses{};
     for (std::size_t index = 0; index < reference.bought.size(); ++index) {
         const auto account = accounting.account(ParticipantId{index + 1});
         require(account.has_value() && marketlab::to_string(account->buy_volume) == reference.bought[index] &&
@@ -443,12 +446,25 @@ void check_accounts(const marketlab::ParticipantLedger& accounting, const Ledger
         const auto cash = account->cash_flow();
         require(cash.negative == expected_cash.first && marketlab::to_string(cash.magnitude) == expected_cash.second,
             "participant net cash flow differs from decimal ledger");
+        for (std::size_t mark_index = 0; mark_index < marks.size(); ++mark_index) {
+            const auto ticks = std::to_string(marks[mark_index]);
+            const auto credits = add_decimal(reference.received[index], decimal_product(reference.bought[index], ticks));
+            const auto debits = add_decimal(reference.spent[index], decimal_product(reference.sold[index], ticks));
+            const auto expected_pnl = decimal_difference(credits, debits);
+            const auto pnl = account->total_pnl(marketlab::Price::from_ticks(marks[mark_index]).value());
+            require(pnl && pnl->negative == expected_pnl.first &&
+                marketlab::to_string(pnl->magnitude) == expected_pnl.second,
+                "participant total PnL differs from independent marked ledger");
+            auto& total = pnl->negative ? losses[mark_index] : gains[mark_index];
+            total = total.add(pnl->magnitude).value();
+        }
         const auto expected = decimal_difference(reference.bought[index], reference.sold[index]);
         const auto position = account->position();
         require(position.negative == expected.first && marketlab::to_string(position.magnitude) == expected.second,
             "participant net position differs from decimal ledger");
     }
     require(total_spent == total_received, "participant cash debits and credits do not reconcile");
+    require(gains == losses, "participant total PnL does not reconcile at common marks");
     require(accounting.history().size() == reference.executions.size() &&
         accounting.last_event_sequence().value == (reference.executions.empty() ? 0 : reference.executions.back().event_sequence.value),
         "accounting execution count or last sequence differs");

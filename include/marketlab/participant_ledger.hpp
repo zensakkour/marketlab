@@ -23,6 +23,12 @@ struct NetPosition {
     constexpr bool operator==(const NetPosition&) const noexcept = default;
 };
 
+struct TotalPnl {
+    bool negative{};
+    CashAmount magnitude{};
+    constexpr bool operator==(const TotalPnl&) const noexcept = default;
+};
+
 struct ParticipantAccount {
     AggregateQuantity buy_volume{};
     AggregateQuantity sell_volume{};
@@ -41,6 +47,24 @@ struct ParticipantAccount {
             return {false, *sell_notional.subtract(buy_notional)};
         }
         return {true, *buy_notional.subtract(sell_notional)};
+    }
+
+    [[nodiscard]] constexpr std::optional<TotalPnl> total_pnl(Price mark) const noexcept {
+        const auto cash = cash_flow();
+        const auto net = position();
+        const auto inventory = CashAmount::from_aggregate(mark, net.magnitude);
+        if (cash.negative == net.negative) {
+            const auto sum = cash.magnitude.add(inventory);
+            if (!sum) {
+                return std::nullopt;
+            }
+            return TotalPnl{cash.negative && *sum != CashAmount{}, *sum};
+        }
+        if (cash.magnitude >= inventory) {
+            const auto difference = *cash.magnitude.subtract(inventory);
+            return TotalPnl{cash.negative && difference != CashAmount{}, difference};
+        }
+        return TotalPnl{net.negative, *inventory.subtract(cash.magnitude)};
     }
 
     constexpr bool operator==(const ParticipantAccount&) const noexcept = default;

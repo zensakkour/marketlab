@@ -37,8 +37,8 @@ The first reference experiment targets a market-making strategy trading against 
 Development is organized around small, validated implementation steps. After each completed step, the local `PROGRESS.md` is updated with completed checklist items, concise implementation details, relevant validation, important design decisions, and real benchmark results where applicable. The implementation sequence prioritizes specification -> correctness -> testing -> measurement -> optimization. `PROGRESS.md` remains local and is not part of the public repository.
 
 Phase 8 accounting now tracks execution history, bought/sold volumes, exact net
-positions and cash flows in a separate participant ledger. Realised and
-mark-to-market PnL remain later parts of this phase. See
+positions, cash flows and total PnL at caller-supplied prices in a separate
+participant ledger. Realised/unrealised decomposition remains later work. See
 [participant accounting](docs/participant-accounting.md) for the implemented
 contract and examples.
 
@@ -63,7 +63,8 @@ instrument configuration requires a nonzero ID and a nonempty symbol.
 For v0, a participant is represented by its `ParticipantId`. Orders and executions
 carry that identity directly. Participant registration belongs to fixed
 `Exchange` configuration. `ParticipantLedger` owns downstream execution history,
-gross volumes, net positions and cash flows; strategy behavior and PnL remain later work.
+gross volumes, net positions, cash flows and total PnL; strategy behavior and
+realised/unrealised decomposition remain later work.
 
 Submitted order quantities must be positive; zero is supported for remaining
 quantities after a complete fill. Requests retain raw quantity and tick-price
@@ -184,8 +185,17 @@ Flows start at zero, in units of price ticks times quantity; negative cash is
 allowed. `CashAmount` stores checked 192-bit amounts, preserving valid totals
 beyond 128 bits. Monetary interpretation requires the configured instrument's
 `TickSize`. Checked `multiply(uint64_t)` scales a `CashAmount` by an integer,
-returning an empty optional if the product exceeds 192 bits. Funding, solvency
-checks, fees and PnL are outside this cash-flow API.
+returning an empty optional if the product exceeds 192 bits.
+`from_aggregate(Price, AggregateQuantity)` computes an exact price-times-quantity
+amount without narrowing cumulative quantities to 64 bits. It selects no market
+price or PnL policy.
+
+`ParticipantAccount::total_pnl(Price mark)` derives exact signed total PnL as net
+cash plus position times an explicit whole-tick price. It allocates nothing and
+changes no account state. The optional result is always present for ledger
+accounts; arbitrary caller-created values return an empty optional on overflow.
+Funding, solvency checks, fees and realised/unrealised decomposition remain
+outside this API.
 
 The matching contract is in [docs/matching-semantics.md](docs/matching-semantics.md).
 `OrderBook` owns passive resting limits for one nonzero instrument ID. It stores
@@ -342,15 +352,17 @@ and depth allocation failures followed by retry.
 4,096 single-bit pairs and 10,000 independent decimal products. `cash_amount`
 checks 192-bit arithmetic and decimal boundaries, overflow/borrow/carry, and
 10,000 generated trade products and accumulated sums, plus 10,000 scalar products
-checked against independent decimal arithmetic, including overflow.
+checked against independent decimal arithmetic, including overflow. Another
+10,000 cases verify full-width aggregate quantities times exact prices.
 
 `participant_ledger` checks initial state, account snapshots, signed positions
-and cash flows,
-self-matches, invalid/order/registration refusal, whole-batch rollback, correction,
+and cash flows, total PnL at explicit prices, self-matches,
+invalid/order/registration refusal, whole-batch rollback, correction,
 full and incremental replay, quantity totals beyond 64 bits and cash beyond
 128 bits. `participant_ledger_allocation` injects each map/history allocation failure, preserves prior history views and
 verifies one-time retry from retained, already committed simulation executions.
-Generated workloads also compare each account to independent decimal arithmetic
+Generated workloads also compare cash, positions and total PnL at three marks
+to independent decimal arithmetic
 and replay their full execution history.
 
 `event_record` checks all nine exact output lines, raw rejection fields, integer
@@ -638,6 +650,37 @@ execution and last execution sequence 8. The exchange's later cancellation/statu
 events do not advance that execution-only ledger counter or change positions/cash.
 The normal integration test checks these exact lines over twenty fresh replays
 and reconstructs the accounts from retained execution history.
+
+### Inspect total PnL at a chosen price
+
+Provide an explicit positive whole-tick valuation price:
+
+```powershell
+cmake --build build/debug --target simulation_delivery_tests
+.\build\debug\simulation_delivery_tests.exe --pnl-script 102
+$LASTEXITCODE
+```
+
+In a Unix shell:
+
+```sh
+./build/debug/simulation_delivery_tests --pnl-script 102
+echo $?
+```
+
+For the existing 2-unit trade at 101 ticks, this prints:
+
+```text
+instrument_id=1 participant_id=1 mark_ticks=102 total_pnl_tick_units=2
+instrument_id=1 participant_id=2 mark_ticks=102 total_pnl_tick_units=-2
+```
+
+Total PnL is net execution cash plus signed position times the supplied price.
+At mark 101 both results are zero; at mark 100 they are -2 and 2. Output uses
+exact tick-times-quantity units. The command chooses no price from market data
+and does not split realised/unrealised PnL. Use decimal digits from 1 through
+INT64_MAX; missing, zero, negative, fractional, out-of-range or trailing-text
+marks return exit code 2 with usage. Success returns 0.
 
 ### Reproduce a generated workload
 

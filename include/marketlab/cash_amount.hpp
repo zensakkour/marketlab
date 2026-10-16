@@ -1,5 +1,6 @@
 #pragma once
 
+#include <marketlab/aggregate_quantity.hpp>
 #include <marketlab/detail/unsigned_product.hpp>
 #include <marketlab/price.hpp>
 #include <marketlab/quantity.hpp>
@@ -22,6 +23,12 @@ struct CashAmount {
         const auto product = detail::multiply_unsigned64(
             static_cast<std::uint64_t>(price.ticks()), static_cast<std::uint64_t>(quantity.units()));
         return {0, product.high, product.low};
+    }
+
+    [[nodiscard]] static constexpr CashAmount from_aggregate(Price price, AggregateQuantity quantity) noexcept {
+        // A 128-bit quantity times a positive int64 price is always below 2^191.
+        return *CashAmount{0, quantity.high_units, quantity.low_units}.multiply(
+            static_cast<std::uint64_t>(price.ticks()));
     }
 
     [[nodiscard]] constexpr std::optional<CashAmount> add(CashAmount other) const noexcept {

@@ -2,8 +2,9 @@
 
 Phase 8 quantity and cash-flow accounting is implemented in
 `<marketlab/participant_ledger.hpp>`: execution history, bought/sold volume, net
-positions and exact spent/received/net cash for one configured instrument.
-Realised and mark-to-market PnL remain the next part of this phase.
+positions, exact spent/received/net cash and total PnL at explicit prices for one
+configured instrument. Realised/unrealised decomposition remains the next part
+of this phase.
 
 ## Ownership and initial state
 
@@ -73,6 +74,13 @@ work; do not treat raw tick notionals from different instruments as one cash uni
 `AggregateQuantity`; cash and position units cannot be implicitly interchanged.
 `from_trade(Price, Quantity)` computes an exact trade product using portable
 32-bit partial products. A zero quantity produces zero.
+
+`from_aggregate(Price, AggregateQuantity)` computes the corresponding exact
+notional for a cumulative quantity, including sizes above UINT64_MAX. Every
+unsigned 128-bit quantity times a positive int64 price is below 2^191, so this
+returns a `CashAmount` directly without an overflow case. It is constexpr/noexcept
+and allocates nothing. This is an arithmetic conversion: callers supply the
+price; the helper does not choose a market mark or implement a PnL convention.
 
 Each valid trade has price and quantity at most INT64_MAX, so its notional is
 less than 2^126. At most UINT64_MAX distinct increasing event sequences can enter
@@ -178,6 +186,9 @@ if (account) {
     const auto cash = account->cash_flow();
     const auto tick_units = marketlab::to_string(cash.magnitude);
     // cash.negative distinguishes a net debit from credit/zero.
+    const auto mark = marketlab::Price::from_ticks(102).value();
+    const auto pnl = account->total_pnl(mark).value();
+    // pnl is read-only total PnL at this explicit price, in tick-times-quantity units.
 }
 ```
 
@@ -222,21 +233,46 @@ multiplication. `cash_amount` checks carry/borrow/overflow, decimal boundaries
 through UINT192_MAX, five maximum trade products and 10,000 independent decimal
 product/sum comparisons. Another 10,000 generated scalar products compare
 fitting results and overflow decisions to full-width decimal multiplication.
+An additional 10,000 full-width aggregate-quantity/price products are checked
+against decimal arithmetic, alongside bounded-trade agreement, maximum input
+boundaries and a real ledger position above UINT64_MAX.
 
 The [README](../README.md#inspect-the-scripted-participant-accounts) gives build,
 test and `--account-script` commands, including signed `cash_tick_units` output.
-Funding, cost basis, realised PnL, marks and total PnL remain unimplemented.
+Funding, cost basis and realised/unrealised decomposition remain unimplemented.
 
-## Proposed next batch: total PnL
+## Total PnL at an explicit mark
 
-This proposal is awaiting the user's accounting decision and is not implemented.
-With zero initial inventory and cash, calculate total PnL as net execution cash
-flow plus signed net position times a valuation price. The caller would supply
-an explicit positive whole-tick `Price` for this instrument. No last-trade, bid,
-ask or midpoint fallback would be selected by the ledger. Marks would be read-only
-inputs, without changing cash, volumes, history or event sequences.
+`ParticipantAccount::total_pnl(Price mark) noexcept` returns an optional
+`TotalPnl{negative, magnitude}` in the same tick-times-quantity units as cash:
 
-Proposed review cases, in tick-times-quantity units:
+```text
+total PnL = net cash flow + signed net position * mark.ticks()
+```
+
+The caller supplies a positive whole-tick price for the ledger's instrument.
+The account does not choose a last trade, bid, ask, midpoint or stale-price
+fallback. An explicit mark is required even for a flat account; its result is
+then independent of the mark. This read-only query leaves cash, volumes, history
+and exchange counters unchanged. Revalue by calling it again with a new price.
+A self-match leaves the result unchanged at a fixed mark. Zero is canonical
+nonnegative; `TotalPnl` is distinct from `NetCashFlow`.
+
+The result includes the effect of closed trades and the marked open position.
+It does not split realised and unrealised PnL or assign a cost basis. Starting
+cash/inventory are zero and fees are absent, as in the existing cash-flow ledger.
+The mark carries no instrument ID or timestamp: the caller is responsible for
+its instrument and observation time. Half-tick marks are outside this API.
+
+Ledger cash magnitude is below 2^190, and its position magnitude below 2^127.
+Multiplying by a positive int64 mark stays below 2^190, so the total magnitude
+is below 2^191 and fits `CashAmount`. Every ledger-produced account therefore
+returns a value. Because callers can also construct arbitrary `ParticipantAccount`
+values, same-sign addition may exceed 192 bits; that case returns an empty
+optional, without wrapping or saturation. Opposite signs use exact subtraction.
+The calculation is constexpr/noexcept and allocates nothing.
+
+Examples, starting at zero:
 
 | Executions for A | Net cash | Net position | Mark in ticks | Total PnL |
 | --- | ---: | ---: | ---: | ---: |
@@ -245,7 +281,13 @@ Proposed review cases, in tick-times-quantity units:
 | Buy 5 at 100, sell 5 at 104 | +20 | 0 | 110 | +20 |
 | Buy 5 at 100, sell 7 at 104 | +228 | -2 | 103 | +22 |
 
-A self-match would leave total PnL unchanged at a fixed mark. Counterparties
-valued at the same mark would have offsetting total PnL. Exact arithmetic would
-cover cumulative positions beyond 64 bits. Realised/unrealised decomposition,
-cost-basis conventions and half-tick marks would remain separate decisions.
+Counterparties valued at the same mark have offsetting total PnL. Rebuilding
+an account from the same executions produces the same result at any given mark.
+Tests cover partial closes, reversals, self-matches, full-range marks, large
+positions/cash, signed cancellation, caller-created overflow and non-allocating
+reads. Generated workloads compare to independent decimal credits minus debits
+at marks 1, 103 and INT64_MAX after every request and reconcile gains with losses.
+
+The [README](../README.md#inspect-total-pnl-at-a-chosen-price) documents the
+`--pnl-script <mark_ticks>` example. Realised/unrealised decomposition and its
+cost-basis convention remain the next part of Phase 8.

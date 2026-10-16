@@ -5,16 +5,19 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <iostream>
 #include <limits>
+#include <optional>
 #include <span>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -131,6 +134,7 @@ struct ScriptResult {
     std::string recording;
     std::string market_data;
     std::string accounting;
+    std::string pnl;
 };
 
 constexpr std::string_view expected_script_record =
@@ -238,7 +242,22 @@ constexpr std::string_view expected_account_script =
     "instrument_id=1 participant_id=2 buy_units=0 sell_units=2 position_units=-2 "
     "cash_tick_units=202 execution_count=1 last_execution_seq=8\n";
 
-ScriptResult run_script(bool record_events = false, bool apply_accounting = false) {
+void write_pnl(std::ostream& output, const marketlab::ParticipantLedger& ledger,
+    std::span<const ParticipantId> participants, Price mark) {
+    for (const auto participant : participants) {
+        const auto pnl = ledger.account(participant)->total_pnl(mark).value();
+        output << "instrument_id=" << ledger.instrument_id().value << " participant_id=" << participant.value
+               << " mark_ticks=" << mark.ticks() << " total_pnl_tick_units=";
+        if (pnl.negative) output << '-';
+        output << marketlab::to_string(pnl.magnitude) << '\n';
+    }
+}
+
+constexpr std::string_view expected_pnl_script =
+    "instrument_id=1 participant_id=1 mark_ticks=102 total_pnl_tick_units=2\n"
+    "instrument_id=1 participant_id=2 mark_ticks=102 total_pnl_tick_units=-2\n";
+
+ScriptResult run_script(bool record_events = false, bool apply_accounting = false, std::optional<Price> mark = {}) {
     const std::array participants{ParticipantId{1}, ParticipantId{2}};
     Simulation simulation{Instrument{{1}, "TEST", TickSize::from_decimal(1, 0).value()}, participants};
     marketlab::ParticipantLedger ledger{{1}, participants};
@@ -332,6 +351,7 @@ ScriptResult run_script(bool record_events = false, bool apply_accounting = fals
     require(record_events ? market_data.str() == expected_market_script : market_data.str().empty(),
         "script market snapshots differ");
     std::ostringstream accounting;
+    std::ostringstream pnl;
     if (apply_accounting) {
         marketlab::ParticipantLedger rebuilt{{1}, participants};
         require(rebuilt.apply(ledger.history()).has_value() &&
@@ -339,8 +359,13 @@ ScriptResult run_script(bool record_events = false, bool apply_accounting = fals
             ledger.last_event_sequence().value == 8, "script accounting replay differs");
         write_accounts(accounting, ledger, participants);
         require(accounting.good() && accounting.str() == expected_account_script, "script accounting output differs");
+        if (mark) {
+            write_pnl(pnl, ledger, participants, *mark);
+            require(pnl.good() && rebuilt.account({1})->total_pnl(*mark) == ledger.account({1})->total_pnl(*mark) &&
+                rebuilt.account({2})->total_pnl(*mark) == ledger.account({2})->total_pnl(*mark), "script PnL replay differs");
+        }
     }
-    return {std::move(history), *survivor, recording.str(), market_data.str(), accounting.str()};
+    return {std::move(history), *survivor, recording.str(), market_data.str(), accounting.str(), pnl.str()};
 }
 
 bool test_lifecycle() {
@@ -413,22 +438,48 @@ bool test_lifecycle() {
         exchange.book().order_count() == 0 && exchange.book().check_invariants();
 }
 
+std::optional<Price> parse_mark(std::string_view text) noexcept {
+    std::int64_t ticks{};
+    const auto result = std::from_chars(text.data(), text.data() + text.size(), ticks);
+    if (result.ec != std::errc{} || result.ptr != text.data() + text.size()) {
+        return std::nullopt;
+    }
+    return Price::from_ticks(ticks);
+}
+
+void test_mark_parsing() {
+    require(parse_mark("1") == Price::from_ticks(1) && parse_mark("000102") == Price::from_ticks(102) &&
+        parse_mark("9223372036854775807") == Price::from_ticks(std::numeric_limits<std::int64_t>::max()),
+        "valid valuation mark refused");
+    constexpr std::array<std::string_view, 10> invalid{
+        "", "0", "-1", "+102", "1.5", "102x", " 102", "102 ", "1e2", "9223372036854775808"};
+    for (const auto text : invalid) require(!parse_mark(text), "invalid valuation mark accepted");
+}
+
 int main(int argc, char** argv) {
     const bool print_record = argc == 2 && std::string_view{argv[1]} == "--record-script";
     const bool print_market = argc == 2 && std::string_view{argv[1]} == "--market-script";
     const bool print_account = argc == 2 && std::string_view{argv[1]} == "--account-script";
-    if (argc != 1 && !print_record && !print_market && !print_account) {
-        std::cerr << "usage: simulation_delivery_tests [--record-script|--market-script|--account-script]\n";
+    const auto mark = argc == 3 && std::string_view{argv[1]} == "--pnl-script" ?
+        parse_mark(argv[2]) : std::nullopt;
+    const bool print_pnl = mark.has_value();
+    if (argc != 1 && !print_record && !print_market && !print_account && !print_pnl) {
+        std::cerr << "usage: simulation_delivery_tests "
+                     "[--record-script|--market-script|--account-script|--pnl-script <mark_ticks>]\n";
         return 2;
     }
+
     try {
+        test_mark_parsing();
         require(test_lifecycle(), "simulation lifecycle, past scheduling, or rejection delivery differs");
         const auto reference = run_script();
         std::string recording;
         std::string market_data;
         std::string accounting;
+        std::string pnl;
+        const auto valuation_mark = mark.value_or(Price::from_ticks(102).value());
         for (int repeat = 0; repeat < 20; ++repeat) {
-            auto replay = run_script(true, true);
+            auto replay = run_script(true, true, valuation_mark);
             require(std::equal(reference.events.begin(), reference.events.end(), replay.events.begin(), replay.events.end(), same_event),
                 "script replay event/execution sequence differs");
             require(same_order(reference.survivor.order, replay.survivor.order) &&
@@ -436,9 +487,11 @@ int main(int argc, char** argv) {
             recording = std::move(replay.recording);
             market_data = std::move(replay.market_data);
             accounting = std::move(replay.accounting);
+            if (!print_pnl) require(replay.pnl == expected_pnl_script, "script total PnL output differs");
+            pnl = std::move(replay.pnl);
         }
-        if (print_record || print_market || print_account) {
-            const auto& output = print_account ? accounting : print_market ? market_data : recording;
+        if (print_record || print_market || print_account || print_pnl) {
+            const auto& output = print_pnl ? pnl : print_account ? accounting : print_market ? market_data : recording;
             std::cout.write(output.data(), static_cast<std::streamsize>(output.size()));
             std::cout.flush();
             if (!std::cout) return 1;
