@@ -1,6 +1,7 @@
 #pragma once
 
 #include <marketlab/aggregate_quantity.hpp>
+#include <marketlab/cash_amount.hpp>
 #include <marketlab/execution.hpp>
 #include <marketlab/identifiers.hpp>
 
@@ -25,12 +26,21 @@ struct NetPosition {
 struct ParticipantAccount {
     AggregateQuantity buy_volume{};
     AggregateQuantity sell_volume{};
+    CashAmount buy_notional{};
+    CashAmount sell_notional{};
 
     [[nodiscard]] constexpr NetPosition position() const noexcept {
         if (buy_volume >= sell_volume) {
             return {false, *buy_volume.subtract(sell_volume)};
         }
         return {true, *sell_volume.subtract(buy_volume)};
+    }
+
+    [[nodiscard]] constexpr NetCashFlow cash_flow() const noexcept {
+        if (sell_notional >= buy_notional) {
+            return {false, *sell_notional.subtract(buy_notional)};
+        }
+        return {true, *buy_notional.subtract(sell_notional)};
     }
 
     constexpr bool operator==(const ParticipantAccount&) const noexcept = default;
@@ -124,6 +134,13 @@ public:
             assert(bought && sold);
             buyer.buy_volume = *bought;
             seller.sell_volume = *sold;
+            const auto notional = CashAmount::from_trade(execution.price, execution.quantity);
+            const auto spent = buyer.buy_notional.add(notional);
+            const auto received = seller.sell_notional.add(notional);
+            // At most UINT64_MAX executions, each notional below 2^126: sum < 2^190.
+            assert(spent && received);
+            buyer.buy_notional = *spent;
+            seller.sell_notional = *received;
         }
         static_assert(std::is_nothrow_copy_constructible_v<Execution>);
         static_assert(std::is_nothrow_move_constructible_v<Execution>);

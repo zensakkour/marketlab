@@ -20,6 +20,8 @@ static_assert(long_one.position() == NetPosition{false, {0, 1}});
 constexpr ParticipantAccount short_one{long_one.sell_volume, long_one.buy_volume};
 static_assert(short_one.position() == NetPosition{true, {0, 1}});
 static_assert(noexcept(flat.position()));
+static_assert(noexcept(flat.cash_flow()));
+static_assert(flat.cash_flow() == NetCashFlow{});
 static_assert(!std::is_convertible_v<NetPosition, Quantity>);
 static_assert(std::is_same_v<decltype(std::declval<const ParticipantLedger&>().history()), std::span<const Execution>>);
 static_assert(!std::is_copy_constructible_v<ParticipantLedger>);
@@ -60,12 +62,12 @@ void test_balances_and_replay() {
     const auto saved = ledger.account({1});
     const std::array next{trade(8, 3, 1, 2, 2, 1), trade(11, 4, 2, 4, 1, 1)};
     require(ledger.apply(next).has_value(), "round-trip/self-match batch failed");
-    require(ledger.account({1}) == ParticipantAccount{{0, 9}, {0, 6}} &&
-        ledger.account({2}) == ParticipantAccount{{0, 2}, {0, 5}} &&
+    require(ledger.account({1}) == account_at_100(9, 6) &&
+        ledger.account({2}) == account_at_100(2, 5) &&
         ledger.account({3}) == ParticipantAccount{}, "gross volumes or unused participant differ");
     require(ledger.account({1})->position() == NetPosition{false, {0, 3}} &&
         ledger.account({2})->position() == NetPosition{true, {0, 3}}, "net positions do not reconcile");
-    require(saved == ParticipantAccount{{0, 5}, {}} && ledger.history().size() == 3 &&
+    require(saved == account_at_100(5, 0) && ledger.history().size() == 3 &&
         same_execution(ledger.history()[0], first[0]) && same_execution(ledger.history()[1], next[0]) &&
         same_execution(ledger.history()[2], next[1]), "owned account or exact execution history differs");
     const auto* borrowed = ledger.history().data();
@@ -82,7 +84,7 @@ void test_balances_and_replay() {
     check_same(ledger, incremental);
     auto detached = ledger.account({1});
     detached->buy_volume = {std::numeric_limits<std::uint64_t>::max(), 0};
-    require(ledger.account({1}) == ParticipantAccount{{0, 9}, {0, 6}}, "caller mutated ledger through account copy");
+    require(ledger.account({1}) == account_at_100(9, 6), "caller mutated ledger through account copy");
     const auto duplicate = ledger.apply(ledger.history());
     require(!duplicate && duplicate.error() == AccountingError::OutOfOrder &&
         ledger.history().data() == borrowed, "duplicate history was applied or invalidated a borrowed view");
@@ -124,7 +126,7 @@ void test_failed_batches() {
         const std::array batch{trade(20, 11, 11, 3), test.record};
         const auto result = ledger.apply(batch);
         require(!result && result.error() == test.error && ledger.account({1}) == before &&
-            ledger.account({2}) == ParticipantAccount{{}, {0, 5}} && ledger.account({3}) == ParticipantAccount{} &&
+            ledger.account({2}) == account_at_100(0, 5) && ledger.account({3}) == ParticipantAccount{} &&
             ledger.history().size() == 1 && ledger.history().data() == borrowed &&
             same_execution(ledger.history().front(), prior.front()) && ledger.last_event_sequence().value == 10,
             "invalid suffix committed a prefix, changed history or reported the wrong error");
@@ -161,8 +163,48 @@ void test_large_volumes_and_final_sequence() {
     check_same(ledger, replay);
 }
 
+void test_cash_flows() {
+    ParticipantLedger ledger{{1}, participants};
+    const std::array trades{trade(2, 1, 0, 5), trade(8, 2, 1, 2, 2, 1), trade(11, 3, 2, 4, 1, 1)};
+    require(ledger.apply(trades).has_value(), "cash scenario failed");
+    const auto buyer = ledger.account({1}).value();
+    require(buyer.cash_flow() == NetCashFlow{true, {0, 0, 300}} &&
+        ledger.account({2})->cash_flow() == NetCashFlow{false, {0, 0, 300}} &&
+        ledger.account({3})->cash_flow() == NetCashFlow{}, "net cash does not reconcile after reversal/self-match");
+    ParticipantLedger self{{1}, participants};
+    const std::array self_trade{trade(1, 1, 0, 7, 1, 1)};
+    require(self.apply(self_trade).has_value() && self.account({1}) == account_at_100(7, 7) &&
+        self.account({1})->cash_flow() == NetCashFlow{}, "self-match created net cash");
+    const auto saved = buyer.cash_flow();
+    const auto duplicate = ledger.apply(trades);
+    require(!duplicate && ledger.account({1})->cash_flow() == saved, "duplicate changed cash");
+
+    ParticipantLedger large{{1}, participants};
+    constexpr auto maximum = std::numeric_limits<std::int64_t>::max();
+    std::vector<Execution> executions;
+    for (std::uint64_t index = 1; index <= 5; ++index) {
+        auto execution = trade(2 * index, index, index, maximum);
+        execution.price = Price::from_ticks(maximum).value();
+        executions.push_back(execution);
+    }
+    require(large.apply(executions).has_value(), "large cash batch failed");
+    const CashAmount expected{1, 0x3ffffffffffffffb, 5};
+    require(large.account({1})->buy_notional == expected && large.account({2})->sell_notional == expected &&
+        large.account({1})->cash_flow() == NetCashFlow{true, expected} &&
+        large.account({2})->cash_flow() == NetCashFlow{false, expected},
+        "cash flow narrowed or wrapped beyond 128 bits");
+    auto final = trade(std::numeric_limits<std::uint64_t>::max(), 6, 6, maximum, 1, 1);
+    final.price = Price::from_ticks(maximum).value();
+    require(large.apply(std::span{&final, 1}).has_value() && large.account({1})->cash_flow() == NetCashFlow{true, expected},
+        "large self-match changed net cash");
+    ParticipantLedger replay{{1}, participants};
+    require(replay.apply(large.history()).has_value(), "cash history replay failed");
+    check_same(large, replay);
+}
+
 int main() {
     try {
+        test_cash_flows();
         test_configuration();
         test_balances_and_replay();
         test_failed_batches();

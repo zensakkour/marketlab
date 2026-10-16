@@ -62,9 +62,9 @@ void test_failure_and_retry() {
                 require(ledger.apply(batch).has_value(), "accounting retry failed");
             }
             require(ledger.history().size() == existing + batch.size() &&
-                ledger.account({1}) == ParticipantAccount{{0, 2 * existing + 3}, {0, 5}} &&
-                ledger.account({2}) == ParticipantAccount{{0, 5}, {0, 2 * existing}} &&
-                ledger.account({3}) == ParticipantAccount{{0, 7}, {0, 10}} &&
+                ledger.account({1}) == account_at_100(2 * existing + 3, 5) &&
+                ledger.account({2}) == account_at_100(5, 2 * existing) &&
+                ledger.account({3}) == account_at_100(7, 10) &&
                 std::equal(ledger.history().begin(), ledger.history().begin() + static_cast<std::ptrdiff_t>(existing),
                     prior.begin(), prior.end(), same_execution) &&
                 std::equal(ledger.history().begin() + static_cast<std::ptrdiff_t>(existing), ledger.history().end(),
@@ -91,14 +91,16 @@ void test_reads_and_refusals_do_not_allocate() {
     const auto account = ledger.account({1});
     const auto missing = ledger.account({99});
     const auto position = account->position();
+    const auto cash = account->cash_flow();
     const auto history = ledger.history();
     const auto last = ledger.last_event_sequence();
     const auto empty = ledger.apply({});
     const auto duplicate = ledger.apply(first);
     const auto refused = ledger.apply(invalid_batch);
     allocations_before_failure = -1;
-    require(instrument.value == 1 && account == ParticipantAccount{{0, 5}, {}} && !missing &&
-        position == NetPosition{false, {0, 5}} && history.size() == 1 && history.data() == borrowed &&
+    require(instrument.value == 1 && account == account_at_100(5, 0) && !missing &&
+        position == NetPosition{false, {0, 5}} && cash == NetCashFlow{true, {0, 0, 500}} &&
+        history.size() == 1 && history.data() == borrowed &&
         last.value == 2 && empty && !duplicate && duplicate.error() == AccountingError::OutOfOrder &&
         !refused && refused.error() == AccountingError::UnknownParticipant && ledger.history().size() == 1,
         "read, empty batch or diagnostic allocated or changed state");
@@ -147,8 +149,9 @@ void test_simulation_output_retry() {
             exchange.cumulative_volume() == AggregateQuantity{0, 8} && exchange.book().order_count() == 1 &&
             remainder && remainder->remaining_quantity.units() == 2 && exchange.book().check_invariants(),
             "accounting retry reprocessed an exchange request or changed pending delivery");
-        require(ledger.account({1}) == ParticipantAccount{{0, 8}, {}} &&
-            ledger.account({2}) == ParticipantAccount{{}, {0, 3}} && ledger.account({3}) == ParticipantAccount{{}, {0, 5}} &&
+        require(ledger.account({1}) == ParticipantAccount{{0, 8}, {}, {0, 0, 813}, {}} &&
+            ledger.account({2}) == ParticipantAccount{{}, {0, 3}, {}, {0, 0, 303}} &&
+            ledger.account({3}) == ParticipantAccount{{}, {0, 5}, {}, {0, 0, 510}} &&
             std::equal(ledger.history().begin(), ledger.history().end(), executions.begin(), executions.end(), same_execution),
             "accounting retry lost or doubled committed fills");
         if (!failed) break;

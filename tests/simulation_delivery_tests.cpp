@@ -224,14 +224,19 @@ void write_accounts(std::ostream& output, const marketlab::ParticipantLedger& le
                << " buy_units=" << marketlab::to_string(account.buy_volume)
                << " sell_units=" << marketlab::to_string(account.sell_volume) << " position_units=";
         if (position.negative) output << '-';
-        output << marketlab::to_string(position.magnitude) << " execution_count=" << ledger.history().size()
+        output << marketlab::to_string(position.magnitude) << " cash_tick_units=";
+        const auto cash = account.cash_flow();
+        if (cash.negative) output << '-';
+        output << marketlab::to_string(cash.magnitude) << " execution_count=" << ledger.history().size()
                << " last_execution_seq=" << ledger.last_event_sequence().value << '\n';
     }
 }
 
 constexpr std::string_view expected_account_script =
-    "instrument_id=1 participant_id=1 buy_units=2 sell_units=0 position_units=2 execution_count=1 last_execution_seq=8\n"
-    "instrument_id=1 participant_id=2 buy_units=0 sell_units=2 position_units=-2 execution_count=1 last_execution_seq=8\n";
+    "instrument_id=1 participant_id=1 buy_units=2 sell_units=0 position_units=2 "
+    "cash_tick_units=-202 execution_count=1 last_execution_seq=8\n"
+    "instrument_id=1 participant_id=2 buy_units=0 sell_units=2 position_units=-2 "
+    "cash_tick_units=202 execution_count=1 last_execution_seq=8\n";
 
 ScriptResult run_script(bool record_events = false, bool apply_accounting = false) {
     const std::array participants{ParticipantId{1}, ParticipantId{2}};
@@ -286,8 +291,8 @@ ScriptResult run_script(bool record_events = false, bool apply_accounting = fals
             }
             require(ledger.apply(executions).has_value(), "script accounting ingestion failed");
             const std::uint64_t units = index < 3 ? 0 : 2;
-            require(ledger.account({1}) == marketlab::ParticipantAccount{{0, units}, {}} &&
-                ledger.account({2}) == marketlab::ParticipantAccount{{}, {0, units}} &&
+            require(ledger.account({1}) == marketlab::ParticipantAccount{{0, units}, {}, {0, 0, 101 * units}, {}} &&
+                ledger.account({2}) == marketlab::ParticipantAccount{{}, {0, units}, {}, {0, 0, 101 * units}} &&
                 ledger.history().size() == (units == 0 ? 0U : 1U), "script accounting changed without execution");
         }
         if (record_events) {

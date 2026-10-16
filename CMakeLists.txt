@@ -9,7 +9,8 @@ target_compile_features(marketlab INTERFACE cxx_std_23)
 
 include(CTest)
 if(BUILD_TESTING)
-    foreach(test_name IN ITEMS price aggregate_quantity domain requests orders events event_record market_data
+    foreach(test_name IN ITEMS price aggregate_quantity unsigned_product cash_amount
+                               domain requests orders events event_record market_data
                                participant_ledger participant_ledger_allocation
                                simulation simulation_queue simulation_queue_allocation
                                simulation_delivery

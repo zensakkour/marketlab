@@ -23,6 +23,11 @@ inline Execution trade(std::uint64_t event, std::uint64_t request, std::uint64_t
         Price::from_ticks(100).value(), Quantity::from_units(units).value()};
 }
 
+inline ParticipantAccount account_at_100(std::uint64_t bought, std::uint64_t sold) {
+    // Small fixture quantities only; boundary expectations are specified explicitly.
+    return {{0, bought}, {0, sold}, {0, 0, 100 * bought}, {0, 0, 100 * sold}};
+}
+
 inline bool same_execution(const Execution& left, const Execution& right) {
     return left.timestamp == right.timestamp && left.event_sequence == right.event_sequence &&
         left.request_sequence == right.request_sequence && left.instrument_id == right.instrument_id &&

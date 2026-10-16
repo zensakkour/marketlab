@@ -99,6 +99,8 @@ struct Ledger {
     std::string traded_units{"0"};
     std::array<std::string, 3> bought{"0", "0", "0"};
     std::array<std::string, 3> sold{"0", "0", "0"};
+    std::array<std::string, 3> spent{"0", "0", "0"};
+    std::array<std::string, 3> received{"0", "0", "0"};
     std::vector<Execution> executions;
     std::array<std::size_t, 6> categories{};
 
@@ -229,6 +231,10 @@ void reconcile(const OrderRequest& request, std::span<const ExchangeEvent> event
         const auto seller = static_cast<std::size_t>(execution.seller_id.value - 1);
         ledger.bought[buyer] = add_decimal_units(ledger.bought[buyer], static_cast<std::uint64_t>(units));
         ledger.sold[seller] = add_decimal_units(ledger.sold[seller], static_cast<std::uint64_t>(units));
+        const auto notional = decimal_product(static_cast<std::uint64_t>(*resting->second.request.limit_price_ticks),
+            static_cast<std::uint64_t>(units));
+        ledger.spent[buyer] = add_decimal(ledger.spent[buyer], notional);
+        ledger.received[seller] = add_decimal(ledger.received[seller], notional);
         ledger.executions.push_back(execution);
         ledger.traded_units = add_decimal_units(ledger.traded_units, static_cast<std::uint64_t>(units));
         // Bounded subtraction avoids overflow even when individual quantities reach INT64_MAX.
@@ -422,15 +428,27 @@ struct WorkloadResult {
 };
 
 void check_accounts(const marketlab::ParticipantLedger& accounting, const Ledger& reference) {
+    marketlab::CashAmount total_spent;
+    marketlab::CashAmount total_received;
     for (std::size_t index = 0; index < reference.bought.size(); ++index) {
         const auto account = accounting.account(ParticipantId{index + 1});
         require(account.has_value() && marketlab::to_string(account->buy_volume) == reference.bought[index] &&
             marketlab::to_string(account->sell_volume) == reference.sold[index], "participant gross volume differs from decimal ledger");
+        require(marketlab::to_string(account->buy_notional) == reference.spent[index] &&
+            marketlab::to_string(account->sell_notional) == reference.received[index],
+            "participant gross notional differs from decimal ledger");
+        total_spent = total_spent.add(account->buy_notional).value();
+        total_received = total_received.add(account->sell_notional).value();
+        const auto expected_cash = decimal_difference(reference.received[index], reference.spent[index]);
+        const auto cash = account->cash_flow();
+        require(cash.negative == expected_cash.first && marketlab::to_string(cash.magnitude) == expected_cash.second,
+            "participant net cash flow differs from decimal ledger");
         const auto expected = decimal_difference(reference.bought[index], reference.sold[index]);
         const auto position = account->position();
         require(position.negative == expected.first && marketlab::to_string(position.magnitude) == expected.second,
             "participant net position differs from decimal ledger");
     }
+    require(total_spent == total_received, "participant cash debits and credits do not reconcile");
     require(accounting.history().size() == reference.executions.size() &&
         accounting.last_event_sequence().value == (reference.executions.empty() ? 0 : reference.executions.back().event_sequence.value),
         "accounting execution count or last sequence differs");
