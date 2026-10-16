@@ -1,5 +1,6 @@
 #include <marketlab/exchange.hpp>
 #include <marketlab/market_data.hpp>
+#include <marketlab/participant_ledger.hpp>
 
 #include "quantity_oracle.hpp"
 
@@ -96,6 +97,9 @@ struct Ledger {
     std::uint64_t events{};
     std::optional<Execution> last_trade;
     std::string traded_units{"0"};
+    std::array<std::string, 3> bought{"0", "0", "0"};
+    std::array<std::string, 3> sold{"0", "0", "0"};
+    std::vector<Execution> executions;
     std::array<std::size_t, 6> categories{};
 
     // A flat scan supplies an independent price/FIFO reference for the indexed book.
@@ -221,6 +225,11 @@ void reconcile(const OrderRequest& request, std::span<const ExchangeEvent> event
         const auto units = std::min(incoming.remaining, resting->second.remaining);
         require(execution.quantity.units() == units, "execution quantity differs from the two remainders");
         ledger.last_trade = execution;
+        const auto buyer = static_cast<std::size_t>(execution.buyer_id.value - 1);
+        const auto seller = static_cast<std::size_t>(execution.seller_id.value - 1);
+        ledger.bought[buyer] = add_decimal_units(ledger.bought[buyer], static_cast<std::uint64_t>(units));
+        ledger.sold[seller] = add_decimal_units(ledger.sold[seller], static_cast<std::uint64_t>(units));
+        ledger.executions.push_back(execution);
         ledger.traded_units = add_decimal_units(ledger.traded_units, static_cast<std::uint64_t>(units));
         // Bounded subtraction avoids overflow even when individual quantities reach INT64_MAX.
         incoming.remaining -= units;
@@ -412,10 +421,29 @@ struct WorkloadResult {
     std::string failure;
 };
 
+void check_accounts(const marketlab::ParticipantLedger& accounting, const Ledger& reference) {
+    for (std::size_t index = 0; index < reference.bought.size(); ++index) {
+        const auto account = accounting.account(ParticipantId{index + 1});
+        require(account.has_value() && marketlab::to_string(account->buy_volume) == reference.bought[index] &&
+            marketlab::to_string(account->sell_volume) == reference.sold[index], "participant gross volume differs from decimal ledger");
+        const auto expected = decimal_difference(reference.bought[index], reference.sold[index]);
+        const auto position = account->position();
+        require(position.negative == expected.first && marketlab::to_string(position.magnitude) == expected.second,
+            "participant net position differs from decimal ledger");
+    }
+    require(accounting.history().size() == reference.executions.size() &&
+        accounting.last_event_sequence().value == (reference.executions.empty() ? 0 : reference.executions.back().event_sequence.value),
+        "accounting execution count or last sequence differs");
+    if (!reference.executions.empty()) {
+        require(same_trade(accounting.history().back(), reference.executions.back()), "accounting last execution payload differs");
+    }
+}
+
 WorkloadResult run(std::uint64_t seed, std::size_t operations, std::optional<std::size_t> inject_at = {}, bool inject_first = false) {
     const std::array participants{ParticipantId{1}, ParticipantId{2}, ParticipantId{3}};
     Exchange exchange{Instrument{{1}, "TEST", TickSize::from_decimal(1, 0).value()}, participants};
     Ledger ledger;
+    marketlab::ParticipantLedger accounting{{1}, participants};
     std::mt19937_64 random{seed};
     WorkloadResult result;
     result.history.reserve(operations);
@@ -454,7 +482,18 @@ WorkloadResult run(std::uint64_t seed, std::size_t operations, std::optional<std
             ledger.time = time;
             ledger.events += output->size();
             check_book(exchange, ledger, operation);
+            std::vector<Execution> executions;
+            for (const auto& event : *output) {
+                if (const auto* execution = std::get_if<Execution>(&event)) executions.push_back(*execution);
+            }
+            require(accounting.apply(executions).has_value(), "valid generated accounting batch failed");
+            check_accounts(accounting, ledger);
         }
+        marketlab::ParticipantLedger replay{{1}, participants};
+        require(replay.apply(accounting.history()).has_value(), "generated history replay failed");
+        check_accounts(replay, ledger);
+        require(std::equal(replay.history().begin(), replay.history().end(),
+            ledger.executions.begin(), ledger.executions.end(), same_trade), "full accounting replay history differs");
     } catch (const std::exception& error) {
         result.failed_operation = result.history.size();
         result.failure = error.what();

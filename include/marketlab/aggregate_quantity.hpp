@@ -26,6 +26,14 @@ struct AggregateQuantity {
         return AggregateQuantity{high_units + carry, low};
     }
 
+    [[nodiscard]] constexpr std::optional<AggregateQuantity> subtract(AggregateQuantity other) const noexcept {
+        if (other > *this) {
+            return std::nullopt;
+        }
+        const auto borrow = static_cast<std::uint64_t>(low_units < other.low_units);
+        return AggregateQuantity{high_units - other.high_units - borrow, low_units - other.low_units};
+    }
+
     constexpr auto operator<=>(const AggregateQuantity&) const noexcept = default;
 };
 

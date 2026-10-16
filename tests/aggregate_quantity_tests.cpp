@@ -26,6 +26,14 @@ static_assert(!AggregateQuantity{maximum, maximum}.add(one));
 static_assert(AggregateQuantity{maximum, maximum}.add(zero) == AggregateQuantity{maximum, maximum});
 static_assert(AggregateQuantity{1, 0} > AggregateQuantity{0, maximum});
 static_assert(noexcept(AggregateQuantity{}.add(one)));
+static_assert(AggregateQuantity{}.subtract({}) == AggregateQuantity{});
+static_assert(!AggregateQuantity{}.subtract({0, 1}));
+static_assert(AggregateQuantity{1, 0}.subtract({0, 1}) == AggregateQuantity{0, maximum});
+static_assert(AggregateQuantity{maximum, 0}.subtract({maximum - 1, maximum}) == AggregateQuantity{0, 1});
+static_assert(AggregateQuantity{maximum, maximum}.subtract({maximum, maximum}) == AggregateQuantity{});
+static_assert(AggregateQuantity{maximum, maximum}.subtract({}) == AggregateQuantity{maximum, maximum});
+static_assert(!AggregateQuantity{1, maximum}.subtract({2, 0}));
+static_assert(noexcept(AggregateQuantity{}.subtract({})));
 
 void require(bool condition, std::string_view message) {
     if (!condition) throw std::runtime_error{std::string{message}};
@@ -59,6 +67,9 @@ void test_generated_additions() {
             static_cast<std::int64_t>(random() >> 1);
         const auto next = total.add(Quantity::from_units(units).value());
         require(next.has_value(), "bounded aggregate sum overflowed");
+        const AggregateQuantity added{0, static_cast<std::uint64_t>(units)};
+        require(next->subtract(total) == added && next->subtract(added) == total,
+            "aggregate subtraction failed to recover the generated operands");
         total = *next;
         decimal = add_decimal_units(std::move(decimal), static_cast<std::uint64_t>(units));
         require(marketlab::to_string(total) == decimal, "generated aggregate differs from decimal oracle");

@@ -1,5 +1,6 @@
 #include <marketlab/event_record.hpp>
 #include <marketlab/market_data.hpp>
+#include <marketlab/participant_ledger.hpp>
 #include <marketlab/simulation.hpp>
 
 #include <algorithm>
@@ -9,6 +10,7 @@
 #include <exception>
 #include <iostream>
 #include <limits>
+#include <span>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -128,6 +130,7 @@ struct ScriptResult {
     RestingOrder survivor;
     std::string recording;
     std::string market_data;
+    std::string accounting;
 };
 
 constexpr std::string_view expected_script_record =
@@ -212,9 +215,28 @@ constexpr std::string_view expected_market_script =
     "spread_ticks=none mid_ticks=none last_ticks=101 last_units=2 last_time_ns=3 last_event_seq=8 "
     "volume_units=2 bids=100:3:1 asks=none\n";
 
-ScriptResult run_script(bool record_events = false) {
+void write_accounts(std::ostream& output, const marketlab::ParticipantLedger& ledger,
+    std::span<const ParticipantId> participants) {
+    for (const auto participant : participants) {
+        const auto account = ledger.account(participant).value();
+        const auto position = account.position();
+        output << "instrument_id=" << ledger.instrument_id().value << " participant_id=" << participant.value
+               << " buy_units=" << marketlab::to_string(account.buy_volume)
+               << " sell_units=" << marketlab::to_string(account.sell_volume) << " position_units=";
+        if (position.negative) output << '-';
+        output << marketlab::to_string(position.magnitude) << " execution_count=" << ledger.history().size()
+               << " last_execution_seq=" << ledger.last_event_sequence().value << '\n';
+    }
+}
+
+constexpr std::string_view expected_account_script =
+    "instrument_id=1 participant_id=1 buy_units=2 sell_units=0 position_units=2 execution_count=1 last_execution_seq=8\n"
+    "instrument_id=1 participant_id=2 buy_units=0 sell_units=2 position_units=-2 execution_count=1 last_execution_seq=8\n";
+
+ScriptResult run_script(bool record_events = false, bool apply_accounting = false) {
     const std::array participants{ParticipantId{1}, ParticipantId{2}};
     Simulation simulation{Instrument{{1}, "TEST", TickSize::from_decimal(1, 0).value()}, participants};
+    marketlab::ParticipantLedger ledger{{1}, participants};
     const auto& exchange = simulation.exchange();
     const auto& queue = simulation.queue();
     const OrderRequest bid{{1}, {1}, {1}, {900}, Side::Buy, OrderType::Limit, 5, 100};
@@ -257,6 +279,17 @@ ScriptResult run_script(bool record_events = false) {
         require(exchange.book().check_invariants() && exchange.current_time() == time &&
             exchange.last_request_sequence().value == index + 1 &&
             exchange.last_event_sequence().value == event_counts[index], "script book or committed clock/counters differ");
+        if (apply_accounting) {
+            std::vector<Execution> executions;
+            for (const auto& event : delivered.events) {
+                if (const auto* execution = std::get_if<Execution>(&event)) executions.push_back(*execution);
+            }
+            require(ledger.apply(executions).has_value(), "script accounting ingestion failed");
+            const std::uint64_t units = index < 3 ? 0 : 2;
+            require(ledger.account({1}) == marketlab::ParticipantAccount{{0, units}, {}} &&
+                ledger.account({2}) == marketlab::ParticipantAccount{{}, {0, units}} &&
+                ledger.history().size() == (units == 0 ? 0U : 1U), "script accounting changed without execution");
+        }
         if (record_events) {
             for (const auto& event : delivered.events) marketlab::write_event_record(recording, event);
             require(recording.good(), "script recording failed");
@@ -293,7 +326,16 @@ ScriptResult run_script(bool record_events = false) {
         "script serialized events differ");
     require(record_events ? market_data.str() == expected_market_script : market_data.str().empty(),
         "script market snapshots differ");
-    return {std::move(history), *survivor, recording.str(), market_data.str()};
+    std::ostringstream accounting;
+    if (apply_accounting) {
+        marketlab::ParticipantLedger rebuilt{{1}, participants};
+        require(rebuilt.apply(ledger.history()).has_value() &&
+            rebuilt.account({1}) == ledger.account({1}) && rebuilt.account({2}) == ledger.account({2}) &&
+            ledger.last_event_sequence().value == 8, "script accounting replay differs");
+        write_accounts(accounting, ledger, participants);
+        require(accounting.good() && accounting.str() == expected_account_script, "script accounting output differs");
+    }
+    return {std::move(history), *survivor, recording.str(), market_data.str(), accounting.str()};
 }
 
 bool test_lifecycle() {
@@ -369,8 +411,9 @@ bool test_lifecycle() {
 int main(int argc, char** argv) {
     const bool print_record = argc == 2 && std::string_view{argv[1]} == "--record-script";
     const bool print_market = argc == 2 && std::string_view{argv[1]} == "--market-script";
-    if (argc != 1 && !print_record && !print_market) {
-        std::cerr << "usage: simulation_delivery_tests [--record-script|--market-script]\n";
+    const bool print_account = argc == 2 && std::string_view{argv[1]} == "--account-script";
+    if (argc != 1 && !print_record && !print_market && !print_account) {
+        std::cerr << "usage: simulation_delivery_tests [--record-script|--market-script|--account-script]\n";
         return 2;
     }
     try {
@@ -378,17 +421,19 @@ int main(int argc, char** argv) {
         const auto reference = run_script();
         std::string recording;
         std::string market_data;
+        std::string accounting;
         for (int repeat = 0; repeat < 20; ++repeat) {
-            auto replay = run_script(true);
+            auto replay = run_script(true, true);
             require(std::equal(reference.events.begin(), reference.events.end(), replay.events.begin(), replay.events.end(), same_event),
                 "script replay event/execution sequence differs");
             require(same_order(reference.survivor.order, replay.survivor.order) &&
                 reference.survivor.remaining_quantity == replay.survivor.remaining_quantity, "script replay final book differs");
             recording = std::move(replay.recording);
             market_data = std::move(replay.market_data);
+            accounting = std::move(replay.accounting);
         }
-        if (print_record || print_market) {
-            const auto& output = print_market ? market_data : recording;
+        if (print_record || print_market || print_account) {
+            const auto& output = print_account ? accounting : print_market ? market_data : recording;
             std::cout.write(output.data(), static_cast<std::streamsize>(output.size()));
             std::cout.flush();
             if (!std::cout) return 1;

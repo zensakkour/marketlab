@@ -36,6 +36,11 @@ The first reference experiment targets a market-making strategy trading against 
 
 Development is organized around small, validated implementation steps. After each completed step, the local `PROGRESS.md` is updated with completed checklist items, concise implementation details, relevant validation, important design decisions, and real benchmark results where applicable. The implementation sequence prioritizes specification -> correctness -> testing -> measurement -> optimization. `PROGRESS.md` remains local and is not part of the public repository.
 
+Phase 8 quantity accounting now tracks execution history, bought/sold volumes and
+exact net positions in a separate participant ledger. Cash and PnL remain later
+parts of this phase. See [participant accounting](docs/participant-accounting.md)
+for the implemented contract and examples.
+
 ## Build, run, and test
 
 The current C++23 components are exact integer-tick prices, nonnegative
@@ -48,14 +53,16 @@ last trade, cumulative volume and top-N depth,
 passive order-book storage, single-match limit fills,
 read-only limit match counting, complete accepted-order processing for limits and
 markets, active-order lookup, owned-order cancellation, and raw order/cancel
-processing through a single-instrument exchange.
+processing through a single-instrument exchange, plus downstream participant
+quantity accounting with failure-atomic execution batches and history replay.
 Logical timestamps count unsigned 64-bit nanoseconds from the simulation origin.
 Tick sizes use a positive decimal coefficient and a scale from 0 through 18;
 instrument configuration requires a nonzero ID and a nonempty symbol.
 
 For v0, a participant is represented by its `ParticipantId`. Orders and executions
 carry that identity directly. Participant registration belongs to fixed
-`Exchange` configuration; strategy behavior, positions, cash, and PnL are later components.
+`Exchange` configuration. `ParticipantLedger` owns downstream execution history,
+gross volumes and net positions; strategy behavior, cash and PnL remain later work.
 
 Submitted order quantities must be positive; zero is supported for remaining
 quantities after a complete fill. Requests retain raw quantity and tick-price
@@ -126,7 +133,8 @@ not advance it. A drained simulation can resume when new current/future requests
 are scheduled; its identities and counters continue. `exchange()` and `queue()`
 expose only const views, preserving the single writer. Drive it by calling `step()`
 until empty, stopping on an engine error. No wall-clock sleeps, callbacks or
-participant accounting are introduced. Delayed reports and latency remain later
+automatic participant accounting are introduced inside the runner. A separate
+ledger consumes returned executions. Delayed reports and latency remain later
 components.
 
 `best_prices(exchange)` from `<marketlab/market_data.hpp>` returns an owned
@@ -153,11 +161,22 @@ no levels. Reads own their vectors and may allocate; allocation failure leaves
 exchange state unchanged. `OrderBook::depth(N)` exposes the underlying projection.
 
 Level totals and cumulative volume use `AggregateQuantity`, two unsigned 64-bit
-words with checked addition and exact decimal `marketlab::to_string()`. They remain
-exact above UINT64_MAX; the v0 request/order bounds keep valid totals below 2^127.
+words with checked addition/subtraction and exact decimal `marketlab::to_string()`.
+Totals remain exact above UINT64_MAX; v0 request/order bounds keep them below
+2^127.
 Volume counts each execution once, including self-matches, and excludes all
 unfilled remainders. No quantity is rounded or saturated. See
 [market data](docs/market-data.md) for arithmetic bounds and ownership.
+
+`ParticipantLedger` from `<marketlab/participant_ledger.hpp>` owns quantity
+accounts for one instrument and fixed participants, initially zero. `apply()`
+accepts a span of committed executions as one complete batch. It rejects invalid,
+foreign, unknown-counterparty or out-of-order records without mutation, and
+allocation failure leaves accounts/history unchanged for retry. `account(id)`
+returns an owned optional with `buy_volume`, `sell_volume` and exact sign/magnitude
+`position()`. `history()` borrows the accepted executions; reacquire after ingestion.
+Rebuild into a fresh ledger from that history. Self-matches increase both gross
+volumes and leave net position unchanged. Cash and PnL are not part of this API.
 
 The matching contract is in [docs/matching-semantics.md](docs/matching-semantics.md).
 `OrderBook` owns passive resting limits for one nonzero instrument ID. It stores
@@ -289,9 +308,10 @@ build files; building compiles the test executables; CTest runs them. Tests are
 enabled explicitly, and compiler warnings are treated as errors.
 
 A successful test run ends with `100% tests passed, 0 tests failed`.
-Currently there are twenty-two registered tests: `price`, `aggregate_quantity`,
+Currently there are twenty-four registered tests: `price`, `aggregate_quantity`,
 `domain`, `requests`, `orders`,
-`events`, `event_record`, `market_data`, `simulation`, `simulation_queue`,
+`events`, `event_record`, `market_data`, `participant_ledger`,
+`participant_ledger_allocation`, `simulation`, `simulation_queue`,
 `simulation_queue_allocation`,
 `simulation_delivery`, `order_book`, `order_book_allocation`, `order_book_matching`,
 `order_book_limit`, `order_book_cancel`, `order_book_market`, `order_book_invariant`,
@@ -307,6 +327,14 @@ arithmetic, numerical boundaries,
 rejections and scheduled delivery. Generated workloads compare snapshots against
 the independent execution ledger. Allocation tests verify non-allocating reads
 and depth allocation failures followed by retry.
+
+`participant_ledger` checks initial state, account snapshots, signed positions,
+self-matches, invalid/order/registration refusal, whole-batch rollback, correction,
+full and incremental replay and totals beyond 64 bits. `participant_ledger_allocation`
+injects each map/history allocation failure, preserves prior history views and
+verifies one-time retry from retained, already committed simulation executions.
+Generated workloads also compare each account to independent decimal arithmetic
+and replay their full execution history.
 
 `event_record` checks all nine exact output lines, raw rejection fields, integer
 limits, locale/stream-setting independence and output errors. Recording the
@@ -390,6 +418,10 @@ $LASTEXITCODE
 $LASTEXITCODE
 .\build\debug\market_data_tests.exe
 $LASTEXITCODE
+.\build\debug\participant_ledger_tests.exe
+$LASTEXITCODE
+.\build\debug\participant_ledger_allocation_tests.exe
+$LASTEXITCODE
 .\build\debug\simulation_tests.exe
 $LASTEXITCODE
 .\build\debug\simulation_queue_tests.exe
@@ -438,6 +470,10 @@ echo $?
 ./build/debug/event_record_tests
 echo $?
 ./build/debug/market_data_tests
+echo $?
+./build/debug/participant_ledger_tests
+echo $?
+./build/debug/participant_ledger_allocation_tests
 echo $?
 ./build/debug/simulation_tests
 echo $?
@@ -546,11 +582,35 @@ second observation contains `bids=100:8:2`; after the partial fill, the fourth h
 `asks=101:3:1`. This is a readable scenario example; the
 versioned event record remains the documented recording format.
 
-Both output modes run the normal integration checks first. Exit code 0 means
+All output modes run the normal integration checks first. Exit code 0 means
 checks and output succeeded; 1 reports failure and 2 reports invalid arguments.
 With no arguments, the executable remains silent on success. CTest compares all
 six literal snapshot lines across twenty fresh replays and checks that observing
 and recording the scenario preserve its event stream and final book.
+
+### Inspect the scripted participant accounts
+
+The same scenario can display its final quantity accounts:
+
+```powershell
+cmake --build build/debug --target simulation_delivery_tests
+.\build\debug\simulation_delivery_tests.exe --account-script
+$LASTEXITCODE
+```
+
+In a Unix shell:
+
+```sh
+./build/debug/simulation_delivery_tests --account-script
+echo $?
+```
+
+It prints two lines. Participant 1 bought 2 units and has net position 2;
+participant 2 sold 2 and has net position -2. Both lines report one ledger
+execution and last execution sequence 8. The exchange's later cancellation/status
+events do not advance that execution-only ledger counter or change positions.
+The normal integration test checks these exact lines over twenty fresh replays
+and reconstructs the accounts from retained execution history.
 
 ### Reproduce a generated workload
 
@@ -586,13 +646,13 @@ These generated workloads validate correctness.
 ### GCC checked-container tests
 
 GCC/libstdc++ can also check container and iterator operations at runtime in a
-separate build. These commands build and run seventeen tests covering exact
-aggregates, market data, recording, simulation, books and the exchange:
+separate build. These commands build and run nineteen tests covering accounting,
+exact aggregates, market data, recording, simulation, books and the exchange:
 
 ```powershell
 cmake -S . -B build/checked -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DCMAKE_CXX_FLAGS=-D_GLIBCXX_DEBUG
-cmake --build build/checked --target aggregate_quantity_tests event_record_tests market_data_tests simulation_tests simulation_queue_tests simulation_queue_allocation_tests simulation_delivery_tests order_book_tests order_book_allocation_tests order_book_matching_tests order_book_limit_tests order_book_cancel_tests order_book_market_tests order_book_invariant_tests exchange_tests exchange_scenario_tests exchange_property_tests
-ctest --test-dir build/checked --output-on-failure -R "^(aggregate_quantity|event_record|market_data|simulation(_queue(_allocation)?|_delivery)?|order_book(_allocation|_matching|_limit|_cancel|_market|_invariant)?|exchange(_scenario|_property)?)$"
+cmake --build build/checked --target participant_ledger_tests participant_ledger_allocation_tests aggregate_quantity_tests event_record_tests market_data_tests simulation_tests simulation_queue_tests simulation_queue_allocation_tests simulation_delivery_tests order_book_tests order_book_allocation_tests order_book_matching_tests order_book_limit_tests order_book_cancel_tests order_book_market_tests order_book_invariant_tests exchange_tests exchange_scenario_tests exchange_property_tests
+ctest --test-dir build/checked --output-on-failure -R "^(participant_ledger(_allocation)?|aggregate_quantity|event_record|market_data|simulation(_queue(_allocation)?|_delivery)?|order_book(_allocation|_matching|_limit|_cancel|_market|_invariant)?|exchange(_scenario|_property)?)$"
 ```
 
 Keep this build separate: the flag changes standard-container layouts, so code

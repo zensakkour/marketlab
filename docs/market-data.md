@@ -102,7 +102,10 @@ the high word first.
 
 `add(Quantity)` returns a new optional aggregate. It detects a carry from the low
 word and returns an empty optional if the high word would overflow, leaving the
-source unchanged. Zero additions are valid. `marketlab::to_string(aggregate)`
+source unchanged. Zero additions are valid. `subtract(AggregateQuantity)` returns
+the exact difference or an empty optional when the result would be negative. It
+handles borrowing across words, also without mutation or allocation.
+`marketlab::to_string(aggregate)`
 returns exact decimal digits, including zero, without floating point or locale
 formatting. String construction can allocate; the arithmetic itself is constexpr,
 non-allocating and noexcept.

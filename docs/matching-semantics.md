@@ -20,7 +20,8 @@ IDs. Symbols are retained as supplied without case conversion or trimming.
 The v0 domain represents participants through `ParticipantId`. A separate
 participant object is not required to identify order owners or execution
 counterparties. Registration belongs to exchange configuration; participant
-behavior and execution-based accounting are later components.
+behavior and cash/PnL are later components; execution-based quantity accounting
+is implemented by the separate `ParticipantLedger`.
 
 The submitting participant supplies an order ID. Accepted order IDs are unique
 across the exchange instance for its entire lifetime, including filled,
@@ -301,6 +302,12 @@ whether those orders remain active.
 
 Participant positions and cash change only through executions. Order submission,
 acceptance, resting, and cancellation do not change filled positions or cash.
+The separate `ParticipantLedger` now records execution history, exact gross buy/sell
+volumes and derived signed net positions for one configured instrument and fixed
+participants. It validates and applies complete execution batches with rollback
+on refusal/allocation failure, and supports reconstruction from retained history.
+Cash and PnL remain future work. See [participant-accounting.md](participant-accounting.md)
+for ownership, delivery ordering, retry behavior and current scope.
 
 Market data is derived from exchange state. Quotes and depth reflect the order
 book; trade information reflects executions. Market data must not become an
