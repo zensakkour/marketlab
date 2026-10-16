@@ -156,7 +156,8 @@ constexpr std::string_view expected_script_record =
     "v=1 type=OrderCancelled time_ns=4 event_seq=12 request_seq=6 instrument_id=1 order_id=900 participant_id=1 "
     "price_ticks=100 cancelled_units=5\n";
 
-void write_market_snapshot(std::ostream& output, const marketlab::MarketSnapshot& snapshot) {
+void write_market_snapshot(std::ostream& output, const marketlab::DepthSnapshot& observation) {
+    const auto& snapshot = observation.market;
     const auto& prices = snapshot.prices;
     output << "instrument_id=" << prices.instrument_id.value << " time_ns=" << prices.timestamp.nanoseconds
            << " request_seq=" << prices.last_request_sequence.value
@@ -179,22 +180,37 @@ void write_market_snapshot(std::ostream& output, const marketlab::MarketSnapshot
     } else {
         output << " last_trade=none";
     }
+    output << " volume_units=" << marketlab::to_string(snapshot.cumulative_volume);
+    const auto write_levels = [&](std::string_view name, const std::vector<marketlab::DepthLevel>& levels) {
+        output << ' ' << name << '=';
+        if (levels.empty()) output << "none";
+        for (std::size_t index = 0; index < levels.size(); ++index) {
+            if (index != 0) output << ',';
+            output << levels[index].price.ticks() << ':' << marketlab::to_string(levels[index].quantity)
+                   << ':' << levels[index].order_count;
+        }
+    };
+    write_levels("bids", observation.depth.bids);
+    write_levels("asks", observation.depth.asks);
     output << '\n';
 }
 
 constexpr std::string_view expected_market_script =
     "instrument_id=1 time_ns=1 request_seq=1 event_seq=2 bid_ticks=100 ask_ticks=none "
-    "spread_ticks=none mid_ticks=none last_trade=none\n"
+    "spread_ticks=none mid_ticks=none last_trade=none volume_units=0 bids=100:5:1 asks=none\n"
     "instrument_id=1 time_ns=1 request_seq=2 event_seq=4 bid_ticks=100 ask_ticks=none "
-    "spread_ticks=none mid_ticks=none last_trade=none\n"
+    "spread_ticks=none mid_ticks=none last_trade=none volume_units=0 bids=100:8:2 asks=none\n"
     "instrument_id=1 time_ns=2 request_seq=3 event_seq=6 bid_ticks=100 ask_ticks=101 "
-    "spread_ticks=1 mid_ticks=100.5 last_trade=none\n"
+    "spread_ticks=1 mid_ticks=100.5 last_trade=none volume_units=0 bids=100:8:2 asks=101:5:1\n"
     "instrument_id=1 time_ns=3 request_seq=4 event_seq=10 bid_ticks=100 ask_ticks=101 "
-    "spread_ticks=1 mid_ticks=100.5 last_ticks=101 last_units=2 last_time_ns=3 last_event_seq=8\n"
+    "spread_ticks=1 mid_ticks=100.5 last_ticks=101 last_units=2 last_time_ns=3 last_event_seq=8 "
+    "volume_units=2 bids=100:8:2 asks=101:3:1\n"
     "instrument_id=1 time_ns=4 request_seq=5 event_seq=11 bid_ticks=100 ask_ticks=none "
-    "spread_ticks=none mid_ticks=none last_ticks=101 last_units=2 last_time_ns=3 last_event_seq=8\n"
+    "spread_ticks=none mid_ticks=none last_ticks=101 last_units=2 last_time_ns=3 last_event_seq=8 "
+    "volume_units=2 bids=100:8:2 asks=none\n"
     "instrument_id=1 time_ns=4 request_seq=6 event_seq=12 bid_ticks=100 ask_ticks=none "
-    "spread_ticks=none mid_ticks=none last_ticks=101 last_units=2 last_time_ns=3 last_event_seq=8\n";
+    "spread_ticks=none mid_ticks=none last_ticks=101 last_units=2 last_time_ns=3 last_event_seq=8 "
+    "volume_units=2 bids=100:3:1 asks=none\n";
 
 ScriptResult run_script(bool record_events = false) {
     const std::array participants{ParticipantId{1}, ParticipantId{2}};
@@ -244,7 +260,7 @@ ScriptResult run_script(bool record_events = false) {
         if (record_events) {
             for (const auto& event : delivered.events) marketlab::write_event_record(recording, event);
             require(recording.good(), "script recording failed");
-            write_market_snapshot(market_data, marketlab::market_snapshot(exchange));
+            write_market_snapshot(market_data, marketlab::depth_snapshot(exchange, 2));
             require(market_data.good(), "script market snapshot output failed");
         }
         history.insert(history.end(), delivered.events.begin(), delivered.events.end());

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <marketlab/aggregate_quantity.hpp>
 #include <marketlab/events.hpp>
 #include <marketlab/execution.hpp>
 #include <marketlab/instrument.hpp>
@@ -7,6 +8,7 @@
 #include <marketlab/requests.hpp>
 
 #include <algorithm>
+#include <cassert>
 #include <cstdint>
 #include <expected>
 #include <limits>
@@ -74,6 +76,10 @@ public:
         return last_trade_;
     }
 
+    [[nodiscard]] AggregateQuantity cumulative_volume() const noexcept {
+        return cumulative_volume_;
+    }
+
     // Capacity errors and allocation exceptions leave all exchange/book state unchanged.
     [[nodiscard]] std::expected<std::vector<ExchangeEvent>, ExchangeError> process_order(
         const OrderRequest& request) {
@@ -127,6 +133,13 @@ public:
                     break;
                 }
             }
+            // Exclude every unfilled remainder, whether rested or expired.
+            // At most UINT64_MAX requests each execute INT64_MAX units: total < 2^127.
+            const auto executed = accepted.original_quantity.subtract(result->remaining_quantity);
+            assert(executed);
+            const auto volume = cumulative_volume_.add(*executed);
+            assert(volume);
+            cumulative_volume_ = *volume;
             commit_request(event_time, request_sequence, last_event);
             return std::move(result->events);
         } catch (...) {
@@ -224,6 +237,7 @@ private:
     RequestSequence last_request_sequence_{};
     EventSequence last_event_sequence_{};
     std::optional<Execution> last_trade_;
+    AggregateQuantity cumulative_volume_{};
 };
 
 } // namespace marketlab

@@ -163,6 +163,7 @@ bool test_delivery_allocations() {
                 if (queue.size() != 3 || queue.last_sequence().value != 5 || queue.next() != pending ||
                     pending->sequence.value != 4 || simulation.current_time().nanoseconds != 0 ||
                     exchange.last_request_sequence().value != 2 || exchange.last_event_sequence().value != 4 ||
+                    exchange.cumulative_volume() != AggregateQuantity{} || exchange.last_trade() ||
                     exchange.book().order_count() != 2 || exchange.book().best_bid() != best_bid ||
                     exchange.book().best_ask() != best_ask || best_bid->remaining_quantity.units() != 3 ||
                     best_ask->remaining_quantity.units() != 5 || best_bid->order.arrival_sequence.value != 1 ||
@@ -176,7 +177,9 @@ bool test_delivery_allocations() {
             if (!delivered || delivered->arrival.sequence.value != 4 || delivered->events.size() != (matched ? 5U : 1U) ||
                 simulation.current_time().nanoseconds != 10 || queue.size() != 2 || queue.last_sequence().value != 5 ||
                 !queue.next() || queue.next()->sequence.value != 3 || exchange.last_request_sequence().value != 3 ||
-                exchange.last_event_sequence().value != (matched ? 9U : 5U) || !exchange.book().check_invariants()) return false;
+                exchange.last_event_sequence().value != (matched ? 9U : 5U) ||
+                exchange.cumulative_volume() != AggregateQuantity{0, matched ? 5U : 0U} ||
+                exchange.last_trade().has_value() != matched || !exchange.book().check_invariants()) return false;
             if (matched) {
                 const auto* execution = std::get_if<Execution>(&delivered->events[1]);
                 if (!execution || execution->quantity.units() != 5 || execution->price.ticks() != 101 ||

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <marketlab/aggregate_quantity.hpp>
 #include <marketlab/events.hpp>
 #include <marketlab/execution.hpp>
 #include <marketlab/identifiers.hpp>
@@ -10,6 +11,7 @@
 #include <marketlab/side.hpp>
 
 #include <algorithm>
+#include <cassert>
 #include <cstddef>
 #include <deque>
 #include <expected>
@@ -65,6 +67,18 @@ struct SingleMatch {
 struct OrderResult {
     std::vector<ExchangeEvent> events;
     Quantity remaining_quantity;
+};
+
+struct DepthLevel {
+    Price price;
+    AggregateQuantity quantity;
+    std::size_t order_count;
+    constexpr bool operator==(const DepthLevel&) const noexcept = default;
+};
+
+struct BookDepth {
+    std::vector<DepthLevel> bids;
+    std::vector<DepthLevel> asks;
 };
 
 class OrderBook {
@@ -147,6 +161,32 @@ public:
 
     [[nodiscard]] const RestingOrder* best_ask() const noexcept {
         return asks_.empty() ? nullptr : &asks_.begin()->second.front();
+    }
+
+    // At most limit price levels per side, best first; owns all returned values.
+    // Allocation failures leave the book and existing borrowed views unchanged.
+    [[nodiscard]] BookDepth depth(std::size_t limit) const {
+        BookDepth result;
+        result.bids.reserve(std::min(limit, bids_.size()));
+        result.asks.reserve(std::min(limit, asks_.size()));
+        const auto append = [](const auto& level, std::vector<DepthLevel>& output) {
+            AggregateQuantity total{};
+            for (const auto& resting : level.second) {
+                // Unique nonzero uint64 order IDs bound the number of live orders.
+                // Their positive int64 remainders sum to less than 2^127.
+                const auto next = total.add(resting.remaining_quantity);
+                assert(next);
+                total = *next;
+            }
+            output.push_back({level.first, total, level.second.size()});
+        };
+        for (auto level = bids_.rbegin(); level != bids_.rend() && result.bids.size() < limit; ++level) {
+            append(*level, result.bids);
+        }
+        for (auto level = asks_.begin(); level != asks_.end() && result.asks.size() < limit; ++level) {
+            append(*level, result.asks);
+        }
+        return result;
     }
 
     // This storage operation does not accept a request or emit exchange events.

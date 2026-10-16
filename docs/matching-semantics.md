@@ -326,6 +326,16 @@ owned record with `BestPrices` at a completed request boundary. Snapshot time ca
 advance beyond the last trade's original time. The derived record has no public
 mutation path and is updated only from successful exchange executions.
 
+Cumulative volume adds executed units once per execution, including self-matches,
+and excludes rested/expired remainders. It starts at zero, survives non-trading
+requests unchanged and shares the exchange's failure-atomic commit boundary.
+`AggregateQuantity` stores exact unsigned 128-bit totals using two 64-bit words;
+v0 request and active-order bounds keep volume and any level total below 2^127.
+`OrderBook::depth(N)` aggregates current remainders/counts at up to N prices per
+side, best first. `depth_snapshot(exchange, N)` owns those levels and the complete
+market snapshot. Query allocation failures change no state. Full definitions and
+bounds are in [market-data.md](market-data.md).
+
 ### Current book primitives
 
 `OrderBook` owns resting records for one instrument using ordered price levels

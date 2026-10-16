@@ -49,6 +49,55 @@ void operator delete[](void* allocation, std::size_t) noexcept {
     ::operator delete(allocation);
 }
 
+bool test_depth_allocations() {
+    using namespace marketlab;
+    const std::array participants{ParticipantId{1}};
+    for (const std::size_t limit : {std::size_t{0}, std::size_t{1}, std::numeric_limits<std::size_t>::max()}) {
+        for (std::ptrdiff_t fault = 0; ; ++fault) {
+            Exchange exchange{Instrument{{1}, "TEST", TickSize::from_decimal(1, 0).value()}, participants};
+            const auto order = [](std::uint64_t id, Side side, std::int64_t ticks, std::int64_t units) {
+                return OrderRequest{{0}, {1}, {1}, {id}, side, OrderType::Limit, units, ticks};
+            };
+            if (!exchange.process_order(order(1, Side::Buy, 100, 1)) ||
+                !exchange.process_order(order(2, Side::Sell, 100, 1))) return false;
+            constexpr auto maximum = std::numeric_limits<std::int64_t>::max();
+            for (std::uint64_t id = 3; id <= 8; ++id) {
+                if (!exchange.process_order(order(id, Side::Buy, 90 - static_cast<std::int64_t>(id % 3), maximum)) ||
+                    !exchange.process_order(order(id + 6, Side::Sell, 110 + static_cast<std::int64_t>(id % 3), maximum))) {
+                    return false;
+                }
+            }
+            const auto reference = depth_snapshot(exchange, limit);
+            const auto* bid = exchange.book().best_bid();
+            const auto* ask = exchange.book().best_ask();
+            std::optional<DepthSnapshot> observed;
+            bool failed = false;
+            allocations_before_failure = fault;
+            try {
+                observed.emplace(depth_snapshot(exchange, limit));
+                allocations_before_failure = -1;
+            } catch (const std::bad_alloc&) {
+                allocations_before_failure = -1;
+                failed = true;
+            }
+            const auto current = market_snapshot(exchange);
+            if (current.prices.timestamp != reference.market.prices.timestamp ||
+                current.prices.last_request_sequence != reference.market.prices.last_request_sequence ||
+                current.prices.last_event_sequence != reference.market.prices.last_event_sequence ||
+                current.cumulative_volume != reference.market.cumulative_volume ||
+                !current.last_trade || current.last_trade->event_sequence != reference.market.last_trade->event_sequence ||
+                exchange.book().best_bid() != bid || exchange.book().best_ask() != ask ||
+                exchange.book().order_count() != 12 || !exchange.book().check_invariants()) return false;
+            if (failed) observed.emplace(depth_snapshot(exchange, limit));
+            if (!observed || observed->depth.bids != reference.depth.bids || observed->depth.asks != reference.depth.asks) {
+                return false;
+            }
+            if (!failed) break;
+        }
+    }
+    return true;
+}
+
 bool test_last_trade_allocations() {
     using namespace marketlab;
     const std::array participants{ParticipantId{1}};
@@ -65,8 +114,10 @@ bool test_last_trade_allocations() {
         allocations_before_failure = 0;
         const auto no_allocation = market_snapshot(exchange);
         const auto copied_trade = exchange.last_trade();
+        const auto copied_volume = exchange.cumulative_volume();
         allocations_before_failure = -1;
-        if (!no_allocation.last_trade || !copied_trade || copied_trade->price.ticks() != 100 ||
+        if (copied_volume != AggregateQuantity{0, 1} || no_allocation.cumulative_volume != copied_volume ||
+            !no_allocation.last_trade || !copied_trade || copied_trade->price.ticks() != 100 ||
             no_allocation.last_trade->event_sequence != before.last_trade->event_sequence) return false;
         auto request = order(5, Side::Buy, 103, 12);
         request.timestamp = {10};
@@ -85,6 +136,7 @@ bool test_last_trade_allocations() {
             const auto* second = exchange.book().find({4});
             if (!after.last_trade || after.last_trade->event_sequence != before.last_trade->event_sequence ||
                 after.last_trade->price.ticks() != 100 || after.last_trade->quantity.units() != 1 ||
+                after.cumulative_volume != before.cumulative_volume ||
                 after.prices.timestamp != before.prices.timestamp ||
                 after.prices.last_request_sequence != before.prices.last_request_sequence ||
                 after.prices.last_event_sequence != before.prices.last_event_sequence ||
@@ -97,6 +149,7 @@ bool test_last_trade_allocations() {
         if (!after.last_trade || after.last_trade->price.ticks() != 102 ||
             after.last_trade->quantity.units() != 5 || after.last_trade->aggressive_order_id.value != 5 ||
             after.last_trade->event_sequence <= before.last_trade->event_sequence ||
+            after.cumulative_volume != AggregateQuantity{0, 9} ||
             after.prices.timestamp.nanoseconds != 10 || after.last_trade->timestamp.nanoseconds != 10 ||
             !remainder || remainder->remaining_quantity.units() != 4 ||
             !exchange.book().check_invariants()) return false;
@@ -115,7 +168,8 @@ bool test_best_price_allocations() {
     const auto empty_spread = empty.spread_ticks();
     const auto empty_mid = empty.mid_price();
     allocations_before_failure = -1;
-    if (empty_market.last_trade || empty_market.prices.bid || empty_market.prices.ask ||
+    if (empty_market.cumulative_volume != AggregateQuantity{} ||
+        empty_market.last_trade || empty_market.prices.bid || empty_market.prices.ask ||
         empty.bid || empty.ask || empty_spread || empty_mid || empty.timestamp.nanoseconds != 0 ||
         empty.last_request_sequence.value != 0 || empty.last_event_sequence.value != 0) return false;
     constexpr auto maximum = std::numeric_limits<std::int64_t>::max();
@@ -247,6 +301,7 @@ bool test_exchange_cancel_allocations() {
                 }
                 const auto before_request = exchange.last_request_sequence();
                 const auto before_event = exchange.last_event_sequence();
+                const auto before_volume = exchange.cumulative_volume();
                 const auto* bid = exchange.book().best_bid();
                 const auto* ask = exchange.book().best_ask();
                 const auto time = test.reason == RejectionReason::InvalidTimestamp ? 10U : 20U;
@@ -256,6 +311,7 @@ bool test_exchange_cancel_allocations() {
                         exchange.last_request_sequence().value != before_request.value + 1 ||
                         exchange.last_event_sequence().value != before_event.value + 1 ||
                         exchange.current_time().nanoseconds != time ||
+                        exchange.cumulative_volume() != before_volume ||
                         exchange.book().order_count() != (test.reason ? 4U : 3U)) {
                         return false;
                     }
@@ -297,7 +353,8 @@ bool test_exchange_cancel_allocations() {
                 if (failed) {
                     if (!exchange.book().check_invariants() || exchange.current_time().nanoseconds != 10 ||
                         exchange.last_request_sequence() != before_request ||
-                        exchange.last_event_sequence() != before_event || exchange.book().order_count() != 4 ||
+                        exchange.last_event_sequence() != before_event || exchange.cumulative_volume() != before_volume ||
+                        exchange.book().order_count() != 4 ||
                         exchange.book().best_bid() != bid || exchange.book().best_ask() != ask) {
                         return false;
                     }
@@ -583,6 +640,10 @@ bool test_cancel_allocations() {
 }
 
 int main() {
+    if (!test_depth_allocations()) {
+        std::cerr << "depth allocation failure changed exchange state or prevented retry\n";
+        return 1;
+    }
     if (!test_last_trade_allocations()) {
         std::cerr << "last-trade allocation failure changed state or prevented retry\n";
         return 1;

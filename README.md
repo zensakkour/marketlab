@@ -43,8 +43,8 @@ quantities with checked subtraction, distinct order/participant/instrument IDs,
 order sides/types, logical timestamps, instrument tick configuration,
 order/cancel requests, accepted/resting orders, executions, exchange events,
 exact text event recording, scheduled request records, an owning arrival queue
-and simulation delivery, owned market snapshots with exact spread/midpoint and
-last trade,
+and simulation delivery, owned market snapshots with exact spread/midpoint,
+last trade, cumulative volume and top-N depth,
 passive order-book storage, single-match limit fills,
 read-only limit match counting, complete accepted-order processing for limits and
 markets, active-order lookup, owned-order cancellation, and raw order/cancel
@@ -141,10 +141,23 @@ spread is 1 and mid is `{100, true}` (100.5 ticks). Arithmetic stays exact near
 INT64_MAX. See [market data](docs/market-data.md) for fields and current scope.
 
 `market_snapshot(exchange)` combines those prices with an owned optional last
-`Execution`. `Exchange::last_trade()` also copies the last execution directly.
+`Execution` and exact cumulative executed volume. `Exchange::last_trade()` also
+copies the last execution directly.
 The final execution sequence determines the last trade, including equal-time
 fills. Non-trading requests retain it; failures preserve it. Its trade timestamp
 may precede current snapshot time. Both reads are non-allocating and `noexcept`.
+
+`depth_snapshot(exchange, N)` adds up to N best price levels per side, with total
+remaining units and active order counts. Bids descend and asks ascend; N=0 returns
+no levels. Reads own their vectors and may allocate; allocation failure leaves
+exchange state unchanged. `OrderBook::depth(N)` exposes the underlying projection.
+
+Level totals and cumulative volume use `AggregateQuantity`, two unsigned 64-bit
+words with checked addition and exact decimal `marketlab::to_string()`. They remain
+exact above UINT64_MAX; the v0 request/order bounds keep valid totals below 2^127.
+Volume counts each execution once, including self-matches, and excludes all
+unfilled remainders. No quantity is rounded or saturated. See
+[market data](docs/market-data.md) for arithmetic bounds and ownership.
 
 The matching contract is in [docs/matching-semantics.md](docs/matching-semantics.md).
 `OrderBook` owns passive resting limits for one nonzero instrument ID. It stores
@@ -276,7 +289,8 @@ build files; building compiles the test executables; CTest runs them. Tests are
 enabled explicitly, and compiler warnings are treated as errors.
 
 A successful test run ends with `100% tests passed, 0 tests failed`.
-Currently there are twenty-one registered tests: `price`, `domain`, `requests`, `orders`,
+Currently there are twenty-two registered tests: `price`, `aggregate_quantity`,
+`domain`, `requests`, `orders`,
 `events`, `event_record`, `market_data`, `simulation`, `simulation_queue`,
 `simulation_queue_allocation`,
 `simulation_delivery`, `order_book`, `order_book_allocation`, `order_book_matching`,
@@ -285,11 +299,14 @@ Currently there are twenty-one registered tests: `price`, `domain`, `requests`, 
 `--output-on-failure` prints diagnostics from failing tests, and CTest returns a
 nonzero exit code on failure.
 
-`market_data` verifies best prices and metadata after book transitions, retained
-snapshots, last executions, exact spread/midpoint arithmetic, numerical boundaries,
+`aggregate_quantity` checks exact 128-bit decimal boundaries, checked overflow,
+constexpr operations and 10,000 generated additions against independent decimal
+arithmetic. `market_data` verifies depth, volume, best prices and metadata after
+book transitions, retained snapshots, last executions, exact spread/midpoint
+arithmetic, numerical boundaries,
 rejections and scheduled delivery. Generated workloads compare snapshots against
-the independent execution ledger; allocation
-tests verify projection reads with allocation failure armed.
+the independent execution ledger. Allocation tests verify non-allocating reads
+and depth allocation failures followed by retry.
 
 `event_record` checks all nine exact output lines, raw rejection fields, integer
 limits, locale/stream-setting independence and output errors. Recording the
@@ -359,6 +376,8 @@ In Windows PowerShell:
 ```powershell
 .\build\debug\price_tests.exe
 $LASTEXITCODE
+.\build\debug\aggregate_quantity_tests.exe
+$LASTEXITCODE
 .\build\debug\domain_tests.exe
 $LASTEXITCODE
 .\build\debug\requests_tests.exe
@@ -405,6 +424,8 @@ In a Unix shell:
 
 ```sh
 ./build/debug/price_tests
+echo $?
+./build/debug/aggregate_quantity_tests
 echo $?
 ./build/debug/domain_tests
 echo $?
@@ -498,7 +519,8 @@ compare recording enabled/disabled logical results and exact output lines.
 ### Inspect the scripted market snapshots
 
 The same six-arrival scenario can display a market snapshot after each completed
-step, including best prices, spread, exact mid and the last trade:
+step, including best prices, spread, exact mid, last trade, cumulative volume and
+up to two price levels per side:
 
 ```powershell
 cmake --build build/debug --target simulation_delivery_tests
@@ -517,7 +539,11 @@ It prints six lines. The third has bid 100 / ask 101, spread 1 and mid 100.5.
 The fourth reports the execution at price 101, size 2, trade time 3 and event
 sequence 8. The last two retain that trade while cancellations advance snapshot
 time/counters and remove the ask. Missing values print `none`; prices are integer
-ticks and time is logical nanoseconds. This is a readable scenario example; the
+ticks and time is logical nanoseconds. `volume_units` is exact cumulative executed
+size (0 for the first three observations, 2 thereafter). `bids` and `asks` list
+`price_ticks:remaining_units:order_count`, separated by commas, or `none`. The
+second observation contains `bids=100:8:2`; after the partial fill, the fourth has
+`asks=101:3:1`. This is a readable scenario example; the
 versioned event record remains the documented recording format.
 
 Both output modes run the normal integration checks first. Exit code 0 means
@@ -560,13 +586,13 @@ These generated workloads validate correctness.
 ### GCC checked-container tests
 
 GCC/libstdc++ can also check container and iterator operations at runtime in a
-separate build. These commands build and run sixteen tests covering market data,
-recording, simulation, books and the exchange:
+separate build. These commands build and run seventeen tests covering exact
+aggregates, market data, recording, simulation, books and the exchange:
 
 ```powershell
 cmake -S . -B build/checked -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DCMAKE_CXX_FLAGS=-D_GLIBCXX_DEBUG
-cmake --build build/checked --target event_record_tests market_data_tests simulation_tests simulation_queue_tests simulation_queue_allocation_tests simulation_delivery_tests order_book_tests order_book_allocation_tests order_book_matching_tests order_book_limit_tests order_book_cancel_tests order_book_market_tests order_book_invariant_tests exchange_tests exchange_scenario_tests exchange_property_tests
-ctest --test-dir build/checked --output-on-failure -R "^(event_record|market_data|simulation(_queue(_allocation)?|_delivery)?|order_book(_allocation|_matching|_limit|_cancel|_market|_invariant)?|exchange(_scenario|_property)?)$"
+cmake --build build/checked --target aggregate_quantity_tests event_record_tests market_data_tests simulation_tests simulation_queue_tests simulation_queue_allocation_tests simulation_delivery_tests order_book_tests order_book_allocation_tests order_book_matching_tests order_book_limit_tests order_book_cancel_tests order_book_market_tests order_book_invariant_tests exchange_tests exchange_scenario_tests exchange_property_tests
+ctest --test-dir build/checked --output-on-failure -R "^(aggregate_quantity|event_record|market_data|simulation(_queue(_allocation)?|_delivery)?|order_book(_allocation|_matching|_limit|_cancel|_market|_invariant)?|exchange(_scenario|_property)?)$"
 ```
 
 Keep this build separate: the flag changes standard-container layouts, so code

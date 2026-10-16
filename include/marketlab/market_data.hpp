@@ -2,6 +2,7 @@
 
 #include <marketlab/exchange.hpp>
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 
@@ -50,10 +51,20 @@ struct BestPrices {
 struct MarketSnapshot {
     BestPrices prices;
     std::optional<Execution> last_trade;
+    AggregateQuantity cumulative_volume;
 };
 
 [[nodiscard]] inline MarketSnapshot market_snapshot(const Exchange& exchange) noexcept {
-    return {best_prices(exchange), exchange.last_trade()};
+    return {best_prices(exchange), exchange.last_trade(), exchange.cumulative_volume()};
+}
+
+struct DepthSnapshot {
+    MarketSnapshot market;
+    BookDepth depth;
+};
+
+[[nodiscard]] inline DepthSnapshot depth_snapshot(const Exchange& exchange, std::size_t levels) {
+    return {market_snapshot(exchange), exchange.book().depth(levels)};
 }
 
 } // namespace marketlab

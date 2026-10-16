@@ -1,6 +1,8 @@
 #include <marketlab/exchange.hpp>
 #include <marketlab/market_data.hpp>
 
+#include "quantity_oracle.hpp"
+
 #include <algorithm>
 #include <array>
 #include <charconv>
@@ -93,6 +95,7 @@ struct Ledger {
     std::uint64_t time{};
     std::uint64_t events{};
     std::optional<Execution> last_trade;
+    std::string traded_units{"0"};
     std::array<std::size_t, 6> categories{};
 
     // A flat scan supplies an independent price/FIFO reference for the indexed book.
@@ -218,6 +221,7 @@ void reconcile(const OrderRequest& request, std::span<const ExchangeEvent> event
         const auto units = std::min(incoming.remaining, resting->second.remaining);
         require(execution.quantity.units() == units, "execution quantity differs from the two remainders");
         ledger.last_trade = execution;
+        ledger.traded_units = add_decimal_units(ledger.traded_units, static_cast<std::uint64_t>(units));
         // Bounded subtraction avoids overflow even when individual quantities reach INT64_MAX.
         incoming.remaining -= units;
         resting->second.remaining -= units;
@@ -272,7 +276,34 @@ void check_book(const Exchange& exchange, const Ledger& ledger, std::uint64_t se
         require(resting && same_acceptance(resting->order, tracked) && resting->remaining_quantity.units() == tracked.remaining,
             "active record differs from execution ledger");
     }
-    const auto market = marketlab::market_snapshot(exchange);
+
+    const auto depth_limit = sequence % 4 == 3 ? std::numeric_limits<std::size_t>::max() :
+        static_cast<std::size_t>(sequence % 4);
+    const auto projection = marketlab::depth_snapshot(exchange, depth_limit);
+    for (const auto side : {Side::Buy, Side::Sell}) {
+        std::map<std::int64_t, std::pair<std::string, std::size_t>> levels;
+        for (const auto& [id, order] : ledger.active) {
+            if (order.request.side != side) continue;
+            auto [position, inserted] = levels.try_emplace(*order.request.limit_price_ticks, "0", 0);
+            position->second.first = add_decimal_units(position->second.first, static_cast<std::uint64_t>(order.remaining));
+            ++position->second.second;
+        }
+        const auto& actual = side == Side::Buy ? projection.depth.bids : projection.depth.asks;
+        std::size_t index = 0;
+        const auto check = [&](auto first, auto last) {
+            for (; first != last && index < depth_limit; ++first, ++index) {
+                require(index < actual.size() && actual[index].price.ticks() == first->first &&
+                    marketlab::to_string(actual[index].quantity) == first->second.first &&
+                    actual[index].order_count == first->second.second, "depth differs from flat decimal ledger");
+            }
+        };
+        if (side == Side::Buy) check(levels.rbegin(), levels.rend());
+        else check(levels.begin(), levels.end());
+        require(actual.size() == index, "depth returned extra price levels");
+    }
+    const auto& market = projection.market;
+    require(marketlab::to_string(market.cumulative_volume) == ledger.traded_units,
+        "cumulative volume differs from decimal execution ledger");
     require(market.last_trade.has_value() == ledger.last_trade.has_value() &&
         (!ledger.last_trade || same_trade(*market.last_trade, *ledger.last_trade)),
         "last trade differs from reconciled execution ledger");

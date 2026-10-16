@@ -1,11 +1,13 @@
 #include <marketlab/market_data.hpp>
 #include <marketlab/simulation.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <iostream>
+#include <initializer_list>
 #include <limits>
 #include <optional>
 #include <stdexcept>
@@ -303,8 +305,130 @@ void test_scheduled_trade() {
         "empty step changed last trade");
 }
 
+DepthLevel level(std::int64_t ticks, std::uint64_t units, std::size_t orders) {
+    return {Price::from_ticks(ticks).value(), {0, units}, orders};
+}
+
+void check_depth(const Exchange& exchange, std::size_t count,
+    std::initializer_list<DepthLevel> bids, std::initializer_list<DepthLevel> asks) {
+    const auto snapshot = depth_snapshot(exchange, count);
+    require(std::equal(snapshot.depth.bids.begin(), snapshot.depth.bids.end(), bids.begin(), bids.end()) &&
+        std::equal(snapshot.depth.asks.begin(), snapshot.depth.asks.end(), asks.begin(), asks.end()),
+        "depth price, total remainder, count or ordering differs");
+    const auto direct = exchange.book().depth(count);
+    require(snapshot.depth.bids == direct.bids && snapshot.depth.asks == direct.asks &&
+        snapshot.market.prices.instrument_id == exchange.book().instrument_id() &&
+        snapshot.market.prices.timestamp == exchange.current_time() &&
+        snapshot.market.prices.last_request_sequence == exchange.last_request_sequence() &&
+        snapshot.market.prices.last_event_sequence == exchange.last_event_sequence() &&
+        snapshot.market.cumulative_volume == exchange.cumulative_volume(), "depth snapshot metadata differs");
+    require(exchange.book().check_invariants(), "depth read changed book invariants");
+}
+
+void test_depth_transitions() {
+    const std::array participants{ParticipantId{1}, ParticipantId{2}};
+    Exchange exchange{Instrument{{1}, "TEST", TickSize::from_decimal(1, 0).value()}, participants};
+    constexpr auto maximum = std::numeric_limits<std::int64_t>::max();
+    constexpr auto all = std::numeric_limits<std::size_t>::max();
+    check_depth(exchange, all, {}, {});
+    require(exchange.process_order(limit(1, Side::Buy, 100, 5)).has_value() &&
+        exchange.process_order(limit(2, Side::Buy, 100, 3)).has_value() &&
+        exchange.process_order(limit(3, Side::Buy, 99, 2)).has_value() &&
+        exchange.process_order(limit(4, Side::Buy, 98, maximum)).has_value() &&
+        exchange.process_order(limit(5, Side::Sell, 101, 4, 0, 2)).has_value() &&
+        exchange.process_order(limit(6, Side::Sell, 101, 6, 0, 2)).has_value() &&
+        exchange.process_order(limit(7, Side::Sell, 102, 7, 0, 2)).has_value() &&
+        exchange.process_order(limit(8, Side::Sell, 103, 1, 0, 2)).has_value(), "depth preparation failed");
+    check_depth(exchange, 0, {}, {});
+    check_depth(exchange, 1, {level(100, 8, 2)}, {level(101, 10, 2)});
+    check_depth(exchange, 2, {level(100, 8, 2), level(99, 2, 1)}, {level(101, 10, 2), level(102, 7, 1)});
+    check_depth(exchange, all, {level(100, 8, 2), level(99, 2, 1), level(98, maximum, 1)},
+        {level(101, 10, 2), level(102, 7, 1), level(103, 1, 1)});
+    const auto saved = depth_snapshot(exchange, all);
+    require(exchange.process_order(limit(50, Side::Buy, 101, 6, 1)).has_value(), "depth partial fill failed");
+    check_depth(exchange, 1, {level(100, 8, 2)}, {level(101, 4, 1)});
+    require(exchange.process_cancel(CancelRequest{{2}, {1}, {2}, {6}}).has_value(), "depth ask cancel failed");
+    check_depth(exchange, 1, {level(100, 8, 2)}, {level(102, 7, 1)});
+    const OrderRequest sell{{3}, {1}, {2}, {51}, Side::Sell, OrderType::Market, 6, std::nullopt};
+    require(exchange.process_order(sell).has_value(), "depth market sell failed");
+    check_depth(exchange, 1, {level(100, 2, 1)}, {level(102, 7, 1)});
+    require(exchange.process_cancel(CancelRequest{{4}, {1}, {1}, {2}}).has_value(), "depth bid cancel failed");
+    check_depth(exchange, 1, {level(99, 2, 1)}, {level(102, 7, 1)});
+    require(exchange.process_order(limit(52, Side::Sell, 98, 3, 5, 2)).has_value(), "depth multilevel sell failed");
+    check_depth(exchange, all, {level(98, maximum - 1, 1)}, {level(102, 7, 1), level(103, 1, 1)});
+    require(exchange.process_order(limit(53, Side::Buy, 103, 10, 6)).has_value(), "depth crossing remainder failed");
+    check_depth(exchange, all, {level(103, 2, 1), level(98, maximum - 1, 1)}, {});
+    const auto invalid = exchange.process_order(limit(54, Side::Buy, 100, 0, 7));
+    require(invalid && std::holds_alternative<OrderRejected>(invalid->front()), "depth rejection failed");
+    check_depth(exchange, all, {level(103, 2, 1), level(98, maximum - 1, 1)}, {});
+    require(exchange.cumulative_volume() == AggregateQuantity{0, 23}, "depth scenario volume differs");
+    require(saved.depth.bids.size() == 3 && saved.depth.asks.size() == 3 &&
+        saved.depth.bids.front() == level(100, 8, 2) && saved.depth.asks.front() == level(101, 10, 2) &&
+        saved.market.cumulative_volume == AggregateQuantity{} && saved.market.prices.timestamp.nanoseconds == 0,
+        "owned depth snapshot changed after fills and cancels");
+}
+
+void test_large_aggregates() {
+    const std::array participants{ParticipantId{1}};
+    constexpr auto maximum = std::numeric_limits<std::int64_t>::max();
+    const auto detached = [&] {
+        Exchange exchange{Instrument{{1}, "TEST", TickSize::from_decimal(1, 0).value()}, participants};
+        for (std::uint64_t id = 1; id <= 3; ++id) {
+            require(exchange.process_order(limit(id, Side::Buy, 1, maximum)).has_value(), "large bid failed");
+            require(exchange.process_order(limit(id + 3, Side::Sell, maximum, maximum)).has_value(), "large ask failed");
+        }
+        const auto snapshot = depth_snapshot(exchange, 1);
+        const AggregateQuantity expected{1, static_cast<std::uint64_t>(maximum) - 2};
+        require(snapshot.depth.bids.front().quantity == expected && snapshot.depth.asks.front().quantity == expected &&
+            snapshot.depth.bids.front().order_count == 3 && snapshot.depth.asks.front().order_count == 3 &&
+            marketlab::to_string(expected) == "27670116110564327421", "large level total wrapped");
+        // One execution is one trade, including self-matches. Repeat beyond UINT64_MAX.
+        for (std::uint64_t id = 7; id <= 9; ++id) {
+            const OrderRequest buy{{id}, {1}, {1}, {id}, Side::Buy, OrderType::Market, maximum, std::nullopt};
+            require(exchange.process_order(buy).has_value(), "large market execution failed");
+        }
+        const auto after = market_snapshot(exchange);
+        require(after.cumulative_volume == expected && marketlab::to_string(after.cumulative_volume) ==
+            "27670116110564327421", "cumulative volume wrapped or counted both counterparties");
+        require(exchange.process_cancel(CancelRequest{{10}, {1}, {1}, {1}}).has_value(), "large cancel failed");
+        require(exchange.process_order(limit(10, Side::Buy, 1, 0, 11)).has_value(), "large rejection failed");
+        const OrderRequest expired{{12}, {1}, {1}, {11}, Side::Buy, OrderType::Market, maximum, std::nullopt};
+        require(exchange.process_order(expired).has_value() && exchange.cumulative_volume() == expected,
+            "non-trading request changed cumulative volume");
+        require(snapshot.depth.bids.front().quantity == expected && snapshot.market.cumulative_volume == AggregateQuantity{},
+            "saved large snapshot changed");
+        return depth_snapshot(exchange, 1);
+    }();
+    require(detached.depth.bids.size() == 1 && detached.depth.bids.front().order_count == 2 &&
+        detached.depth.bids.front().quantity == AggregateQuantity{0, std::numeric_limits<std::uint64_t>::max() - 1} &&
+        detached.depth.asks.empty() && detached.market.cumulative_volume.high_units == 1,
+        "depth or volume depends on source lifetime");
+}
+
+void test_scheduled_depth_and_volume() {
+    const std::array participants{ParticipantId{1}};
+    Simulation simulation{Instrument{{1}, "TEST", TickSize::from_decimal(1, 0).value()}, participants};
+    require(simulation.schedule(limit(1, Side::Sell, 100, 3, 1)).has_value() &&
+        simulation.schedule(limit(2, Side::Buy, 100, 5, 2)).has_value(), "depth scheduling failed");
+    check_depth(simulation.exchange(), 2, {}, {});
+    require(simulation.exchange().cumulative_volume() == AggregateQuantity{}, "future volume leaked");
+    require(simulation.step().has_value(), "scheduled ask failed");
+    check_depth(simulation.exchange(), 2, {}, {level(100, 3, 1)});
+    require(simulation.exchange().cumulative_volume() == AggregateQuantity{}, "passive arrival created volume");
+    require(simulation.step().has_value(), "scheduled crossing failed");
+    check_depth(simulation.exchange(), 2, {level(100, 2, 1)}, {});
+    const auto saved = depth_snapshot(simulation.exchange(), 2);
+    require(saved.market.cumulative_volume == AggregateQuantity{0, 3}, "scheduled executed volume differs");
+    const auto empty = simulation.step();
+    require(empty && !*empty && simulation.exchange().cumulative_volume() == saved.market.cumulative_volume,
+        "empty step changed volume");
+}
+
 int main() {
     try {
+        test_depth_transitions();
+        test_large_aggregates();
+        test_scheduled_depth_and_volume();
         test_last_trade();
         test_scheduled_trade();
         test_price_transitions();
