@@ -36,9 +36,9 @@ The first reference experiment targets a market-making strategy trading against 
 
 Development is organized around small, validated implementation steps. After each completed step, the local `PROGRESS.md` is updated with completed checklist items, concise implementation details, relevant validation, important design decisions, and real benchmark results where applicable. The implementation sequence prioritizes specification -> correctness -> testing -> measurement -> optimization. `PROGRESS.md` remains local and is not part of the public repository.
 
-Phase 8 accounting now tracks execution history, bought/sold volumes, exact net
-positions, cash flows and total PnL at caller-supplied prices in a separate
-participant ledger. Realised/unrealised decomposition remains later work. See
+Phase 8 accounting now covers execution history, bought/sold volumes, exact net
+positions, cash flows and FIFO realised/unrealised/total PnL at caller-supplied
+prices in a separate participant ledger. Controlled synthetic participants are next. See
 [participant accounting](docs/participant-accounting.md) for the implemented
 contract and examples.
 
@@ -63,8 +63,8 @@ instrument configuration requires a nonzero ID and a nonempty symbol.
 For v0, a participant is represented by its `ParticipantId`. Orders and executions
 carry that identity directly. Participant registration belongs to fixed
 `Exchange` configuration. `ParticipantLedger` owns downstream execution history,
-gross volumes, net positions, cash flows and total PnL; strategy behavior and
-realised/unrealised decomposition remain later work.
+gross volumes, net positions and cash flows. FIFO projections derive realised,
+unrealised and total PnL from history; strategy behavior remains later work.
 
 Submitted order quantities must be positive; zero is supported for remaining
 quantities after a complete fill. Requests retain raw quantity and tick-price
@@ -194,8 +194,11 @@ price or PnL policy.
 cash plus position times an explicit whole-tick price. It allocates nothing and
 changes no account state. The optional result is always present for ledger
 accounts; arbitrary caller-created values return an empty optional on overflow.
-Funding, solvency checks, fees and realised/unrealised decomposition remain
-outside this API.
+`fifo_pnl(ledger, participant, mark)` from `<marketlab/participant_pnl.hpp>` adds
+FIFO realised/unrealised decomposition as an owned `PnlBreakdown`. It reconstructs
+temporary lots on demand; allocation may throw without changing ledger state.
+`PnlAmount` is the shared exact sign/magnitude type; `TotalPnl` remains an alias.
+Funding, solvency checks and fees remain outside these APIs.
 
 The matching contract is in [docs/matching-semantics.md](docs/matching-semantics.md).
 `OrderBook` owns passive resting limits for one nonzero instrument ID. It stores
@@ -327,11 +330,11 @@ build files; building compiles the test executables; CTest runs them. Tests are
 enabled explicitly, and compiler warnings are treated as errors.
 
 A successful test run ends with `100% tests passed, 0 tests failed`.
-Currently there are twenty-six registered tests: `price`, `aggregate_quantity`,
+Currently there are twenty-seven registered tests: `price`, `aggregate_quantity`,
 `unsigned_product`, `cash_amount`,
 `domain`, `requests`, `orders`,
 `events`, `event_record`, `market_data`, `participant_ledger`,
-`participant_ledger_allocation`, `simulation`, `simulation_queue`,
+`participant_ledger_allocation`, `participant_pnl`, `simulation`, `simulation_queue`,
 `simulation_queue_allocation`,
 `simulation_delivery`, `order_book`, `order_book_allocation`, `order_book_matching`,
 `order_book_limit`, `order_book_cancel`, `order_book_market`, `order_book_invariant`,
@@ -364,6 +367,10 @@ verifies one-time retry from retained, already committed simulation executions.
 Generated workloads also compare cash, positions and total PnL at three marks
 to independent decimal arithmetic
 and replay their full execution history.
+`participant_pnl` checks FIFO lot selection, long/short closes and reversals,
+self-matches, owned results, full-width amounts and 1,000 generated executions
+against an independent unit-lot/decimal oracle. Allocation tests exercise every
+FIFO scratch-allocation failure, unchanged history and query retry.
 
 `event_record` checks all nine exact output lines, raw rejection fields, integer
 limits, locale/stream-setting independence and output errors. Recording the
@@ -455,6 +462,8 @@ $LASTEXITCODE
 $LASTEXITCODE
 .\build\debug\participant_ledger_allocation_tests.exe
 $LASTEXITCODE
+.\build\debug\participant_pnl_tests.exe
+$LASTEXITCODE
 .\build\debug\simulation_tests.exe
 $LASTEXITCODE
 .\build\debug\simulation_queue_tests.exe
@@ -511,6 +520,8 @@ echo $?
 ./build/debug/participant_ledger_tests
 echo $?
 ./build/debug/participant_ledger_allocation_tests
+echo $?
+./build/debug/participant_pnl_tests
 echo $?
 ./build/debug/simulation_tests
 echo $?
@@ -682,6 +693,38 @@ and does not split realised/unrealised PnL. Use decimal digits from 1 through
 INT64_MAX; missing, zero, negative, fractional, out-of-range or trailing-text
 marks return exit code 2 with usage. Success returns 0.
 
+### Inspect FIFO realised and unrealised PnL
+
+Use the same explicit positive whole-tick price with the FIFO projection:
+
+```powershell
+cmake --build build/debug --target simulation_delivery_tests
+.\build\debug\simulation_delivery_tests.exe --fifo-pnl-script 102
+$LASTEXITCODE
+```
+
+In a Unix shell:
+
+```sh
+./build/debug/simulation_delivery_tests --fifo-pnl-script 102
+echo $?
+```
+
+It prints realised, unrealised and total PnL in exact tick-times-quantity units:
+
+```text
+instrument_id=1 participant_id=1 mark_ticks=102 realised_pnl_tick_units=0 unrealised_pnl_tick_units=2 total_pnl_tick_units=2
+instrument_id=1 participant_id=2 mark_ticks=102 realised_pnl_tick_units=0 unrealised_pnl_tick_units=-2 total_pnl_tick_units=-2
+```
+
+The script leaves both positions open, so its PnL is entirely unrealised.
+FIFO closes oldest opposite lots when later executions reduce a position;
+self-matches do not change those lots. The query reconstructs temporary lots
+from execution history and leaves the ledger unchanged. The same mark validation
+and exit codes as `--pnl-script` apply. See the
+[accounting examples](docs/participant-accounting.md#fifo-realisedunrealised-decomposition)
+for partial closes, reversals and nonzero realised PnL.
+
 ### Reproduce a generated workload
 
 Run one seed with a chosen request count (decimal seed 0 through UINT64_MAX;
@@ -716,13 +759,13 @@ These generated workloads validate correctness.
 ### GCC checked-container tests
 
 GCC/libstdc++ can also check container and iterator operations at runtime in a
-separate build. These commands build and run twenty-one tests covering accounting,
+separate build. These commands build and run twenty-two tests covering accounting,
 exact aggregates, market data, recording, simulation, books and the exchange:
 
 ```powershell
 cmake -S . -B build/checked -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DCMAKE_CXX_FLAGS=-D_GLIBCXX_DEBUG
-cmake --build build/checked --target unsigned_product_tests cash_amount_tests participant_ledger_tests participant_ledger_allocation_tests aggregate_quantity_tests event_record_tests market_data_tests simulation_tests simulation_queue_tests simulation_queue_allocation_tests simulation_delivery_tests order_book_tests order_book_allocation_tests order_book_matching_tests order_book_limit_tests order_book_cancel_tests order_book_market_tests order_book_invariant_tests exchange_tests exchange_scenario_tests exchange_property_tests
-ctest --test-dir build/checked --output-on-failure -R "^(unsigned_product|cash_amount|participant_ledger(_allocation)?|aggregate_quantity|event_record|market_data|simulation(_queue(_allocation)?|_delivery)?|order_book(_allocation|_matching|_limit|_cancel|_market|_invariant)?|exchange(_scenario|_property)?)$"
+cmake --build build/checked --target unsigned_product_tests cash_amount_tests participant_ledger_tests participant_ledger_allocation_tests participant_pnl_tests aggregate_quantity_tests event_record_tests market_data_tests simulation_tests simulation_queue_tests simulation_queue_allocation_tests simulation_delivery_tests order_book_tests order_book_allocation_tests order_book_matching_tests order_book_limit_tests order_book_cancel_tests order_book_market_tests order_book_invariant_tests exchange_tests exchange_scenario_tests exchange_property_tests
+ctest --test-dir build/checked --output-on-failure -R "^(unsigned_product|cash_amount|participant_ledger(_allocation)?|participant_pnl|aggregate_quantity|event_record|market_data|simulation(_queue(_allocation)?|_delivery)?|order_book(_allocation|_matching|_limit|_cancel|_market|_invariant)?|exchange(_scenario|_property)?)$"
 ```
 
 Keep this build separate: the flag changes standard-container layouts, so code

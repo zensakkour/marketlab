@@ -3,8 +3,8 @@
 Phase 8 quantity and cash-flow accounting is implemented in
 `<marketlab/participant_ledger.hpp>`: execution history, bought/sold volume, net
 positions, exact spent/received/net cash and total PnL at explicit prices for one
-configured instrument. Realised/unrealised decomposition remains the next part
-of this phase.
+configured instrument. `<marketlab/participant_pnl.hpp>` adds FIFO realised and
+unrealised PnL reconstructed on demand from its history.
 
 ## Ownership and initial state
 
@@ -239,7 +239,7 @@ boundaries and a real ledger position above UINT64_MAX.
 
 The [README](../README.md#inspect-the-scripted-participant-accounts) gives build,
 test and `--account-script` commands, including signed `cash_tick_units` output.
-Funding, cost basis and realised/unrealised decomposition remain unimplemented.
+Funding and fees remain outside the implemented accounting scope.
 
 ## Total PnL at an explicit mark
 
@@ -256,7 +256,7 @@ fallback. An explicit mark is required even for a flat account; its result is
 then independent of the mark. This read-only query leaves cash, volumes, history
 and exchange counters unchanged. Revalue by calling it again with a new price.
 A self-match leaves the result unchanged at a fixed mark. Zero is canonical
-nonnegative; `TotalPnl` is distinct from `NetCashFlow`.
+nonnegative; `TotalPnl` is an alias for `PnlAmount`, distinct from `NetCashFlow`.
 
 The result includes the effect of closed trades and the marked open position.
 It does not split realised and unrealised PnL or assign a cost basis. Starting
@@ -289,5 +289,81 @@ reads. Generated workloads compare to independent decimal credits minus debits
 at marks 1, 103 and INT64_MAX after every request and reconcile gains with losses.
 
 The [README](../README.md#inspect-total-pnl-at-a-chosen-price) documents the
-`--pnl-script <mark_ticks>` example. Realised/unrealised decomposition and its
-cost-basis convention remain the next part of Phase 8.
+`--pnl-script <mark_ticks>` example. FIFO decomposition uses the same explicit
+mark and preserves this total.
+
+## FIFO realised/unrealised decomposition
+
+`fifo_pnl(const ParticipantLedger&, ParticipantId, Price mark)` from
+`<marketlab/participant_pnl.hpp>` returns an owned optional `PnlBreakdown` with
+`realised`, `unrealised` and `total` `PnlAmount` fields. Unknown participants,
+including zero, return an empty optional. A registered participant starts at zero.
+The mark follows the same explicit instrument/whole-tick rules as total PnL.
+
+The query replays committed executions in their recorded order. Each non-self
+execution first closes opposite-side lots from oldest to newest; a partial close
+retains the lot's entry price and FIFO position. Any remaining quantity opens a
+new lot at the execution price. A reversal can close the old position and open
+the opposite position in the same execution.
+
+For a closed long, realised PnL is `(exit - entry) * closed_quantity`; for a closed
+short it is `(entry - exit) * closed_quantity`. A self-match retains its existing
+gross volumes/cash/history effects but does not open or close cost-basis lots and
+leaves realised PnL unchanged. All arithmetic uses exact tick-times-quantity units,
+with no fees, funding, floating point, division or rounding.
+
+Unrealised PnL is computed directly from the remaining lots: longs contribute
+`(mark - entry) * remaining`, shorts `(entry - mark) * remaining`. Total PnL
+comes from the account's cash/position identity, independently of FIFO. Thus:
+
+```text
+realised PnL + unrealised PnL = total PnL
+```
+
+Examples, each starting from zero:
+
+| Executions for A | Mark | Realised | Unrealised | Total |
+| --- | ---: | ---: | ---: | ---: |
+| Buy 3 at 100, buy 2 at 110, sell 4 at 120 | 115 | +70 | +5 | +75 |
+| Sell 3 at 110, sell 2 at 100, buy 4 at 90 | 95 | +70 | +5 | +75 |
+| Buy 2 at 100, sell 3 at 120 | 115 | +40 | +5 | +45 |
+| Buy 2 at 100, sell 2 at 90 | 1000 | -20 | 0 | -20 |
+
+The first row closes all three 100-tick units and one 110-tick unit. Its remaining
+unit keeps entry price 110. This distinguishes FIFO from average-cost or LIFO
+accounting. Revaluing at 105 changes unrealised PnL to -5 and total to +65;
+realised PnL stays +70.
+
+Lots are temporary query state, stored in a deque; ingestion keeps no cached
+cost basis or separately mutable realised balance. One query costs O(history
+length) time and O(peak open lot count) temporary storage for the participant.
+It may allocate and is not `noexcept`. Allocation exceptions propagate while
+preserving accounts, history, sequence counters and borrowed views. Retry the
+query, without replaying execution ingestion. Unknown participants and an empty
+history return without allocating. Returned values survive later ingestion or
+ledger destruction. There is no concurrent mutation support.
+
+Closed credit/debit totals are subsets of gross executed sell/buy notionals.
+Open entry and marked notionals are also below 2^190 under the ledger's existing
+quantity/event bounds. Each component is therefore representable in 192 bits;
+the query never rounds or saturates valid history. `PnlAmount::from_difference()`
+derives canonical sign/magnitude from exact nonnegative credits and debits.
+`TotalPnl` is retained as an alias for source compatibility.
+
+Only total PnL must sum to zero across participants at a common mark: individual
+realised and unrealised sums need not vanish. For example, A buying 1 from B at
+100 then selling 1 to C at 110 realises +10 while B's open short has -10 unrealised
+at mark 110; C has zero PnL at that mark.
+
+`participant_pnl` tests FIFO selection, partial/full closes, reversals in both
+directions, long/short losses, self-matches, retained projections, reconstruction,
+full-width quantities/prices and final event sequences. A separate oracle expands
+1,000 generated executions into individual units and checks all three PnL values
+after each execution at marks 1, 99 and INT64_MAX using decimal arithmetic.
+Allocation injection exercises temporary deque creation/growth and exact query
+retry, including projection from retained committed simulation executions.
+
+The [README](../README.md#inspect-fifo-realised-and-unrealised-pnl) gives the
+`--fifo-pnl-script <mark_ticks>` command. FIFO is the implemented convention;
+alternative cost-basis methods, funding, fees and half-tick marks remain outside
+this API.

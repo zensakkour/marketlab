@@ -1,6 +1,7 @@
 #include <marketlab/event_record.hpp>
 #include <marketlab/market_data.hpp>
 #include <marketlab/participant_ledger.hpp>
+#include <marketlab/participant_pnl.hpp>
 #include <marketlab/simulation.hpp>
 
 #include <algorithm>
@@ -135,6 +136,7 @@ struct ScriptResult {
     std::string market_data;
     std::string accounting;
     std::string pnl;
+    std::string fifo_pnl;
 };
 
 constexpr std::string_view expected_script_record =
@@ -257,6 +259,30 @@ constexpr std::string_view expected_pnl_script =
     "instrument_id=1 participant_id=1 mark_ticks=102 total_pnl_tick_units=2\n"
     "instrument_id=1 participant_id=2 mark_ticks=102 total_pnl_tick_units=-2\n";
 
+void write_fifo_pnl(std::ostream& output, const marketlab::ParticipantLedger& ledger,
+    std::span<const ParticipantId> participants, Price mark) {
+    for (const auto participant : participants) {
+        const auto result = marketlab::fifo_pnl(ledger, participant, mark).value();
+        output << "instrument_id=" << ledger.instrument_id().value << " participant_id=" << participant.value
+               << " mark_ticks=" << mark.ticks();
+        const auto write_amount = [&](std::string_view name, marketlab::PnlAmount amount) {
+            output << ' ' << name << '=';
+            if (amount.negative) output << '-';
+            output << marketlab::to_string(amount.magnitude);
+        };
+        write_amount("realised_pnl_tick_units", result.realised);
+        write_amount("unrealised_pnl_tick_units", result.unrealised);
+        write_amount("total_pnl_tick_units", result.total);
+        output << '\n';
+    }
+}
+
+constexpr std::string_view expected_fifo_pnl_script =
+    "instrument_id=1 participant_id=1 mark_ticks=102 realised_pnl_tick_units=0 "
+    "unrealised_pnl_tick_units=2 total_pnl_tick_units=2\n"
+    "instrument_id=1 participant_id=2 mark_ticks=102 realised_pnl_tick_units=0 "
+    "unrealised_pnl_tick_units=-2 total_pnl_tick_units=-2\n";
+
 ScriptResult run_script(bool record_events = false, bool apply_accounting = false, std::optional<Price> mark = {}) {
     const std::array participants{ParticipantId{1}, ParticipantId{2}};
     Simulation simulation{Instrument{{1}, "TEST", TickSize::from_decimal(1, 0).value()}, participants};
@@ -352,6 +378,7 @@ ScriptResult run_script(bool record_events = false, bool apply_accounting = fals
         "script market snapshots differ");
     std::ostringstream accounting;
     std::ostringstream pnl;
+    std::ostringstream fifo_pnl;
     if (apply_accounting) {
         marketlab::ParticipantLedger rebuilt{{1}, participants};
         require(rebuilt.apply(ledger.history()).has_value() &&
@@ -363,9 +390,15 @@ ScriptResult run_script(bool record_events = false, bool apply_accounting = fals
             write_pnl(pnl, ledger, participants, *mark);
             require(pnl.good() && rebuilt.account({1})->total_pnl(*mark) == ledger.account({1})->total_pnl(*mark) &&
                 rebuilt.account({2})->total_pnl(*mark) == ledger.account({2})->total_pnl(*mark), "script PnL replay differs");
+            write_fifo_pnl(fifo_pnl, ledger, participants, *mark);
+            for (const auto participant : participants) {
+                require(marketlab::fifo_pnl(rebuilt, participant, *mark) == marketlab::fifo_pnl(ledger, participant, *mark),
+                    "script FIFO reconstruction differs");
+            }
+            require(fifo_pnl.good(), "script FIFO output failed");
         }
     }
-    return {std::move(history), *survivor, recording.str(), market_data.str(), accounting.str(), pnl.str()};
+    return {std::move(history), *survivor, recording.str(), market_data.str(), accounting.str(), pnl.str(), fifo_pnl.str()};
 }
 
 bool test_lifecycle() {
@@ -460,12 +493,15 @@ int main(int argc, char** argv) {
     const bool print_record = argc == 2 && std::string_view{argv[1]} == "--record-script";
     const bool print_market = argc == 2 && std::string_view{argv[1]} == "--market-script";
     const bool print_account = argc == 2 && std::string_view{argv[1]} == "--account-script";
-    const auto mark = argc == 3 && std::string_view{argv[1]} == "--pnl-script" ?
-        parse_mark(argv[2]) : std::nullopt;
-    const bool print_pnl = mark.has_value();
-    if (argc != 1 && !print_record && !print_market && !print_account && !print_pnl) {
+    const bool wants_pnl = argc == 3 && (std::string_view{argv[1]} == "--pnl-script" ||
+        std::string_view{argv[1]} == "--fifo-pnl-script");
+    const auto mark = wants_pnl ? parse_mark(argv[2]) : std::nullopt;
+    const bool print_pnl = mark && std::string_view{argv[1]} == "--pnl-script";
+    const bool print_fifo = mark && std::string_view{argv[1]} == "--fifo-pnl-script";
+    if (argc != 1 && !print_record && !print_market && !print_account && !print_pnl && !print_fifo) {
         std::cerr << "usage: simulation_delivery_tests "
-                     "[--record-script|--market-script|--account-script|--pnl-script <mark_ticks>]\n";
+                     "[--record-script|--market-script|--account-script|--pnl-script <mark_ticks>|"
+                     "--fifo-pnl-script <mark_ticks>]\n";
         return 2;
     }
 
@@ -477,6 +513,7 @@ int main(int argc, char** argv) {
         std::string market_data;
         std::string accounting;
         std::string pnl;
+        std::string fifo_pnl;
         const auto valuation_mark = mark.value_or(Price::from_ticks(102).value());
         for (int repeat = 0; repeat < 20; ++repeat) {
             auto replay = run_script(true, true, valuation_mark);
@@ -487,11 +524,16 @@ int main(int argc, char** argv) {
             recording = std::move(replay.recording);
             market_data = std::move(replay.market_data);
             accounting = std::move(replay.accounting);
-            if (!print_pnl) require(replay.pnl == expected_pnl_script, "script total PnL output differs");
+            if (!print_pnl && !print_fifo) {
+                require(replay.pnl == expected_pnl_script && replay.fifo_pnl == expected_fifo_pnl_script,
+                    "script PnL output differs");
+            }
             pnl = std::move(replay.pnl);
+            fifo_pnl = std::move(replay.fifo_pnl);
         }
-        if (print_record || print_market || print_account || print_pnl) {
-            const auto& output = print_pnl ? pnl : print_account ? accounting : print_market ? market_data : recording;
+        if (print_record || print_market || print_account || print_pnl || print_fifo) {
+            const auto& output = print_fifo ? fifo_pnl : print_pnl ? pnl :
+                print_account ? accounting : print_market ? market_data : recording;
             std::cout.write(output.data(), static_cast<std::streamsize>(output.size()));
             std::cout.flush();
             if (!std::cout) return 1;

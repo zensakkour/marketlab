@@ -1,5 +1,6 @@
 #include "participant_ledger_test_support.hpp"
 
+#include <marketlab/participant_pnl.hpp>
 #include <marketlab/simulation.hpp>
 
 #include <algorithm>
@@ -83,6 +84,7 @@ void test_reads_and_refusals_do_not_allocate() {
     const std::array first{trade(2, 1, 0, 5)};
     require(ledger.apply(first).has_value(), "read test preparation failed");
     const auto* borrowed = ledger.history().data();
+    ParticipantLedger empty_ledger{{1}, participants};
     auto invalid = trade(4, 2, 1, 1);
     invalid.seller_id = {99};
     const std::array invalid_batch{trade(3, 2, 1, 1), invalid};
@@ -94,6 +96,8 @@ void test_reads_and_refusals_do_not_allocate() {
     const auto cash = account->cash_flow();
     const auto notional = CashAmount::from_aggregate(Price::from_ticks(100).value(), position.magnitude);
     const auto pnl = account->total_pnl(Price::from_ticks(101).value());
+    const auto unknown_fifo = fifo_pnl(ledger, {99}, Price::from_ticks(100).value());
+    const auto empty_fifo = fifo_pnl(empty_ledger, {1}, Price::from_ticks(100).value());
     const auto history = ledger.history();
     const auto last = ledger.last_event_sequence();
     const auto empty = ledger.apply({});
@@ -103,10 +107,51 @@ void test_reads_and_refusals_do_not_allocate() {
     require(instrument.value == 1 && account == account_at_100(5, 0) && !missing &&
         position == NetPosition{false, {0, 5}} && cash == NetCashFlow{true, {0, 0, 500}} &&
         notional == CashAmount{0, 0, 500} && pnl == TotalPnl{false, {0, 0, 5}} &&
+        !unknown_fifo && empty_fifo == PnlBreakdown{} &&
         history.size() == 1 && history.data() == borrowed &&
         last.value == 2 && empty && !duplicate && duplicate.error() == AccountingError::OutOfOrder &&
         !refused && refused.error() == AccountingError::UnknownParticipant && ledger.history().size() == 1,
         "read, empty batch or diagnostic allocated or changed state");
+}
+
+void test_fifo_query_failure_and_retry() {
+    ParticipantLedger ledger{{1}, participants};
+    std::vector<Execution> executions;
+    for (std::uint64_t index = 0; index < 400; ++index) {
+        auto execution = trade(index + 1, index + 1, index, 1);
+        execution.price = Price::from_ticks(static_cast<std::int64_t>(100 + index)).value();
+        executions.push_back(execution);
+    }
+    auto closing = trade(401, 401, 400, 401, 2, 1);
+    closing.price = Price::from_ticks(1000).value();
+    executions.push_back(closing);
+    require(ledger.apply(executions).has_value(), "FIFO allocation preparation failed");
+    const auto buyer = ledger.account({1});
+    const auto seller = ledger.account({2});
+    const auto* borrowed = ledger.history().data();
+    const auto mark = Price::from_ticks(900).value();
+    const PnlBreakdown expected{{false, {0, 0, 280200}}, {false, {0, 0, 100}}, {false, {0, 0, 280300}}};
+    std::size_t failures = 0;
+    for (std::ptrdiff_t fault = 0; ; ++fault) {
+        bool failed = false;
+        allocations_before_failure = fault;
+        try {
+            const auto result = fifo_pnl(ledger, {1}, mark);
+            allocations_before_failure = -1;
+            require(result == expected, "FIFO allocation result differs");
+        } catch (const std::bad_alloc&) {
+            allocations_before_failure = -1;
+            failed = true;
+            ++failures;
+        }
+        require(ledger.account({1}) == buyer && ledger.account({2}) == seller &&
+            ledger.history().data() == borrowed && ledger.last_event_sequence().value == 401 &&
+            std::equal(ledger.history().begin(), ledger.history().end(), executions.begin(), executions.end(), same_execution),
+            "FIFO query failure changed accounts or borrowed history");
+        require(fifo_pnl(ledger, {1}, mark) == expected, "FIFO query retry differs");
+        if (!failed) break;
+    }
+    require(failures != 0, "FIFO temporary allocation failures were not exercised");
 }
 
 void test_simulation_output_retry() {
@@ -157,6 +202,9 @@ void test_simulation_output_retry() {
             ledger.account({3}) == ParticipantAccount{{}, {0, 5}, {}, {0, 0, 510}} &&
             std::equal(ledger.history().begin(), ledger.history().end(), executions.begin(), executions.end(), same_execution),
             "accounting retry lost or doubled committed fills");
+        require(fifo_pnl(ledger, {1}, Price::from_ticks(103).value()) ==
+            PnlBreakdown{{}, {false, {0, 0, 11}}, {false, {0, 0, 11}}},
+            "retained simulation FIFO projection differs");
         if (!failed) break;
     }
 }
@@ -164,6 +212,7 @@ void test_simulation_output_retry() {
 int main() {
     try {
         test_failure_and_retry();
+        test_fifo_query_failure_and_retry();
         test_simulation_output_retry();
         test_reads_and_refusals_do_not_allocate();
     } catch (const std::exception& error) {

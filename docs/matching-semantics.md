@@ -20,9 +20,9 @@ IDs. Symbols are retained as supplied without case conversion or trimming.
 The v0 domain represents participants through `ParticipantId`. A separate
 participant object is not required to identify order owners or execution
 counterparties. Registration belongs to exchange configuration; participant
-behavior and realised/unrealised PnL decomposition are later components;
-execution-based quantity/cash accounting and explicitly marked total PnL are
-implemented by the separate `ParticipantLedger`.
+behavior remains a later component. The separate `ParticipantLedger` records
+execution-based quantity/cash accounts and supports explicitly marked total PnL;
+`fifo_pnl()` reconstructs realised/unrealised PnL from its history.
 
 The submitting participant supplies an order ID. Accepted order IDs are unique
 across the exchange instance for its entire lifetime, including filled,
@@ -311,8 +311,9 @@ on refusal/allocation failure, and supports reconstruction from retained history
 Cash starts from zero in exact tick-times-quantity units, with buys debiting and
 sales crediting; self-matches have zero net cash effect. Negative cash is allowed,
 with no funding/solvency checks or fees. Total PnL is read-only cash plus net
-position times an explicit caller-supplied price; realised/unrealised decomposition
-remains future work. See
+position times an explicit caller-supplied price. FIFO closes oldest opposite lots
+for realised PnL and values remaining lots at the same mark for unrealised PnL;
+self-matches leave cost-basis lots unchanged. See
 [participant-accounting.md](participant-accounting.md)
 for ownership, delivery ordering, retry behavior and current scope.
 

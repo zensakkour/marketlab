@@ -4,6 +4,7 @@
 #include <marketlab/cash_amount.hpp>
 #include <marketlab/execution.hpp>
 #include <marketlab/identifiers.hpp>
+#include <marketlab/pnl_amount.hpp>
 
 #include <cassert>
 #include <cstddef>
@@ -23,11 +24,7 @@ struct NetPosition {
     constexpr bool operator==(const NetPosition&) const noexcept = default;
 };
 
-struct TotalPnl {
-    bool negative{};
-    CashAmount magnitude{};
-    constexpr bool operator==(const TotalPnl&) const noexcept = default;
-};
+using TotalPnl = PnlAmount;
 
 struct ParticipantAccount {
     AggregateQuantity buy_volume{};
