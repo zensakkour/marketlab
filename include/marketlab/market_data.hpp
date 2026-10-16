@@ -47,4 +47,13 @@ struct BestPrices {
         ask ? ask->order.limit_price : std::nullopt};
 }
 
+struct MarketSnapshot {
+    BestPrices prices;
+    std::optional<Execution> last_trade;
+};
+
+[[nodiscard]] inline MarketSnapshot market_snapshot(const Exchange& exchange) noexcept {
+    return {best_prices(exchange), exchange.last_trade()};
+}
+
 } // namespace marketlab

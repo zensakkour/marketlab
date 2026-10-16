@@ -319,6 +319,13 @@ flag, without rounding or floating point. Both are absent for an empty side.
 Unsigned price summation prevents signed overflow at the price maximum; the
 result remains an observation and does not change permitted order-price ticks.
 
+`Exchange::last_trade()` copies the final committed `Execution` in event-sequence
+order, or an empty optional before any execution. Non-trading requests retain it;
+engine/allocation failures preserve it. `market_snapshot(exchange)` combines that
+owned record with `BestPrices` at a completed request boundary. Snapshot time can
+advance beyond the last trade's original time. The derived record has no public
+mutation path and is updated only from successful exchange executions.
+
 ### Current book primitives
 
 `OrderBook` owns resting records for one instrument using ordered price levels

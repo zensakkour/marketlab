@@ -1,4 +1,5 @@
 #include <marketlab/event_record.hpp>
+#include <marketlab/market_data.hpp>
 #include <marketlab/simulation.hpp>
 
 #include <algorithm>
@@ -126,6 +127,7 @@ struct ScriptResult {
     std::vector<ExchangeEvent> events;
     RestingOrder survivor;
     std::string recording;
+    std::string market_data;
 };
 
 constexpr std::string_view expected_script_record =
@@ -154,6 +156,46 @@ constexpr std::string_view expected_script_record =
     "v=1 type=OrderCancelled time_ns=4 event_seq=12 request_seq=6 instrument_id=1 order_id=900 participant_id=1 "
     "price_ticks=100 cancelled_units=5\n";
 
+void write_market_snapshot(std::ostream& output, const marketlab::MarketSnapshot& snapshot) {
+    const auto& prices = snapshot.prices;
+    output << "instrument_id=" << prices.instrument_id.value << " time_ns=" << prices.timestamp.nanoseconds
+           << " request_seq=" << prices.last_request_sequence.value
+           << " event_seq=" << prices.last_event_sequence.value << " bid_ticks=";
+    if (prices.bid) output << prices.bid->ticks(); else output << "none";
+    output << " ask_ticks=";
+    if (prices.ask) output << prices.ask->ticks(); else output << "none";
+    output << " spread_ticks=";
+    if (const auto spread = prices.spread_ticks()) output << *spread; else output << "none";
+    output << " mid_ticks=";
+    if (const auto mid = prices.mid_price()) {
+        output << mid->whole_ticks;
+        if (mid->half_tick) output << ".5";
+    } else {
+        output << "none";
+    }
+    if (const auto& trade = snapshot.last_trade) {
+        output << " last_ticks=" << trade->price.ticks() << " last_units=" << trade->quantity.units()
+               << " last_time_ns=" << trade->timestamp.nanoseconds << " last_event_seq=" << trade->event_sequence.value;
+    } else {
+        output << " last_trade=none";
+    }
+    output << '\n';
+}
+
+constexpr std::string_view expected_market_script =
+    "instrument_id=1 time_ns=1 request_seq=1 event_seq=2 bid_ticks=100 ask_ticks=none "
+    "spread_ticks=none mid_ticks=none last_trade=none\n"
+    "instrument_id=1 time_ns=1 request_seq=2 event_seq=4 bid_ticks=100 ask_ticks=none "
+    "spread_ticks=none mid_ticks=none last_trade=none\n"
+    "instrument_id=1 time_ns=2 request_seq=3 event_seq=6 bid_ticks=100 ask_ticks=101 "
+    "spread_ticks=1 mid_ticks=100.5 last_trade=none\n"
+    "instrument_id=1 time_ns=3 request_seq=4 event_seq=10 bid_ticks=100 ask_ticks=101 "
+    "spread_ticks=1 mid_ticks=100.5 last_ticks=101 last_units=2 last_time_ns=3 last_event_seq=8\n"
+    "instrument_id=1 time_ns=4 request_seq=5 event_seq=11 bid_ticks=100 ask_ticks=none "
+    "spread_ticks=none mid_ticks=none last_ticks=101 last_units=2 last_time_ns=3 last_event_seq=8\n"
+    "instrument_id=1 time_ns=4 request_seq=6 event_seq=12 bid_ticks=100 ask_ticks=none "
+    "spread_ticks=none mid_ticks=none last_ticks=101 last_units=2 last_time_ns=3 last_event_seq=8\n";
+
 ScriptResult run_script(bool record_events = false) {
     const std::array participants{ParticipantId{1}, ParticipantId{2}};
     Simulation simulation{Instrument{{1}, "TEST", TickSize::from_decimal(1, 0).value()}, participants};
@@ -178,6 +220,7 @@ ScriptResult run_script(bool record_events = false) {
     constexpr std::array<std::uint64_t, 6> event_counts{2, 4, 6, 10, 11, 12};
     std::vector<ExchangeEvent> history;
     std::ostringstream recording;
+    std::ostringstream market_data;
     for (std::size_t index = 0; index < requests.size(); ++index) {
         const auto* arrival = queue.next();
         require(arrival && arrival->sequence.value == delivery_sequence[index], "script arrival ordering differs");
@@ -201,6 +244,8 @@ ScriptResult run_script(bool record_events = false) {
         if (record_events) {
             for (const auto& event : delivered.events) marketlab::write_event_record(recording, event);
             require(recording.good(), "script recording failed");
+            write_market_snapshot(market_data, marketlab::market_snapshot(exchange));
+            require(market_data.good(), "script market snapshot output failed");
         }
         history.insert(history.end(), delivered.events.begin(), delivered.events.end());
     }
@@ -230,7 +275,9 @@ ScriptResult run_script(bool record_events = false) {
         !exchange.book().find({50}), "script final active state differs");
     require(record_events ? recording.str() == expected_script_record : recording.str().empty(),
         "script serialized events differ");
-    return {std::move(history), *survivor, recording.str()};
+    require(record_events ? market_data.str() == expected_market_script : market_data.str().empty(),
+        "script market snapshots differ");
+    return {std::move(history), *survivor, recording.str(), market_data.str()};
 }
 
 bool test_lifecycle() {
@@ -305,14 +352,16 @@ bool test_lifecycle() {
 
 int main(int argc, char** argv) {
     const bool print_record = argc == 2 && std::string_view{argv[1]} == "--record-script";
-    if (argc != 1 && !print_record) {
-        std::cerr << "usage: simulation_delivery_tests [--record-script]\n";
+    const bool print_market = argc == 2 && std::string_view{argv[1]} == "--market-script";
+    if (argc != 1 && !print_record && !print_market) {
+        std::cerr << "usage: simulation_delivery_tests [--record-script|--market-script]\n";
         return 2;
     }
     try {
         require(test_lifecycle(), "simulation lifecycle, past scheduling, or rejection delivery differs");
         const auto reference = run_script();
         std::string recording;
+        std::string market_data;
         for (int repeat = 0; repeat < 20; ++repeat) {
             auto replay = run_script(true);
             require(std::equal(reference.events.begin(), reference.events.end(), replay.events.begin(), replay.events.end(), same_event),
@@ -320,9 +369,11 @@ int main(int argc, char** argv) {
             require(same_order(reference.survivor.order, replay.survivor.order) &&
                 reference.survivor.remaining_quantity == replay.survivor.remaining_quantity, "script replay final book differs");
             recording = std::move(replay.recording);
+            market_data = std::move(replay.market_data);
         }
-        if (print_record) {
-            std::cout.write(recording.data(), static_cast<std::streamsize>(recording.size()));
+        if (print_record || print_market) {
+            const auto& output = print_market ? market_data : recording;
+            std::cout.write(output.data(), static_cast<std::streamsize>(output.size()));
             std::cout.flush();
             if (!std::cout) return 1;
         }

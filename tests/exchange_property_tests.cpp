@@ -72,6 +72,14 @@ bool same_command(const Command& left, const Command& right) {
     }, left);
 }
 
+bool same_trade(const Execution& a, const Execution& b) {
+    return a.timestamp == b.timestamp && a.event_sequence == b.event_sequence &&
+        a.request_sequence == b.request_sequence && a.instrument_id == b.instrument_id &&
+        a.aggressive_order_id == b.aggressive_order_id && a.resting_order_id == b.resting_order_id &&
+        a.aggressive_side == b.aggressive_side && a.buyer_id == b.buyer_id && a.seller_id == b.seller_id &&
+        a.price == b.price && a.quantity == b.quantity;
+}
+
 struct TrackedOrder {
     OrderRequest request;
     std::int64_t remaining;
@@ -84,6 +92,7 @@ struct Ledger {
     std::vector<OrderId> accepted_ids;
     std::uint64_t time{};
     std::uint64_t events{};
+    std::optional<Execution> last_trade;
     std::array<std::size_t, 6> categories{};
 
     // A flat scan supplies an independent price/FIFO reference for the indexed book.
@@ -208,6 +217,7 @@ void reconcile(const OrderRequest& request, std::span<const ExchangeEvent> event
             "execution violates resting price, ownership, or price/FIFO priority");
         const auto units = std::min(incoming.remaining, resting->second.remaining);
         require(execution.quantity.units() == units, "execution quantity differs from the two remainders");
+        ledger.last_trade = execution;
         // Bounded subtraction avoids overflow even when individual quantities reach INT64_MAX.
         incoming.remaining -= units;
         resting->second.remaining -= units;
@@ -262,7 +272,11 @@ void check_book(const Exchange& exchange, const Ledger& ledger, std::uint64_t se
         require(resting && same_acceptance(resting->order, tracked) && resting->remaining_quantity.units() == tracked.remaining,
             "active record differs from execution ledger");
     }
-    const auto snapshot = marketlab::best_prices(exchange);
+    const auto market = marketlab::market_snapshot(exchange);
+    require(market.last_trade.has_value() == ledger.last_trade.has_value() &&
+        (!ledger.last_trade || same_trade(*market.last_trade, *ledger.last_trade)),
+        "last trade differs from reconciled execution ledger");
+    const auto& snapshot = market.prices;
     require(snapshot.instrument_id.value == 1 && snapshot.timestamp.nanoseconds == ledger.time &&
         snapshot.last_request_sequence.value == sequence && snapshot.last_event_sequence.value == ledger.events,
         "best-price snapshot metadata differs from ledger");

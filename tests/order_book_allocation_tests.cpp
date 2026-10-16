@@ -49,16 +49,74 @@ void operator delete[](void* allocation, std::size_t) noexcept {
     ::operator delete(allocation);
 }
 
+bool test_last_trade_allocations() {
+    using namespace marketlab;
+    const std::array participants{ParticipantId{1}};
+    for (std::ptrdiff_t fault = 0; ; ++fault) {
+        Exchange exchange{Instrument{{1}, "TEST", TickSize::from_decimal(1, 0).value()}, participants};
+        const auto order = [](std::uint64_t id, Side side, std::int64_t ticks, std::int64_t units) {
+            return OrderRequest{{0}, {1}, {1}, {id}, side, OrderType::Limit, units, ticks};
+        };
+        if (!exchange.process_order(order(1, Side::Buy, 100, 1)) ||
+            !exchange.process_order(order(2, Side::Sell, 100, 1)) ||
+            !exchange.process_order(order(3, Side::Sell, 101, 3)) ||
+            !exchange.process_order(order(4, Side::Sell, 102, 5))) return false;
+        const auto before = market_snapshot(exchange);
+        allocations_before_failure = 0;
+        const auto no_allocation = market_snapshot(exchange);
+        const auto copied_trade = exchange.last_trade();
+        allocations_before_failure = -1;
+        if (!no_allocation.last_trade || !copied_trade || copied_trade->price.ticks() != 100 ||
+            no_allocation.last_trade->event_sequence != before.last_trade->event_sequence) return false;
+        auto request = order(5, Side::Buy, 103, 12);
+        request.timestamp = {10};
+        bool failed = false;
+        allocations_before_failure = fault;
+        try {
+            if (!exchange.process_order(request)) return false;
+            allocations_before_failure = -1;
+        } catch (const std::bad_alloc&) {
+            allocations_before_failure = -1;
+            failed = true;
+        }
+        if (failed) {
+            const auto after = market_snapshot(exchange);
+            const auto* first = exchange.book().find({3});
+            const auto* second = exchange.book().find({4});
+            if (!after.last_trade || after.last_trade->event_sequence != before.last_trade->event_sequence ||
+                after.last_trade->price.ticks() != 100 || after.last_trade->quantity.units() != 1 ||
+                after.prices.timestamp != before.prices.timestamp ||
+                after.prices.last_request_sequence != before.prices.last_request_sequence ||
+                after.prices.last_event_sequence != before.prices.last_event_sequence ||
+                !exchange.book().check_invariants() || exchange.book().order_count() != 2 ||
+                !first || !second || first->remaining_quantity.units() != 3 || second->remaining_quantity.units() != 5 ||
+                !exchange.process_order(request)) return false;
+        }
+        const auto after = market_snapshot(exchange);
+        const auto* remainder = exchange.book().find({5});
+        if (!after.last_trade || after.last_trade->price.ticks() != 102 ||
+            after.last_trade->quantity.units() != 5 || after.last_trade->aggressive_order_id.value != 5 ||
+            after.last_trade->event_sequence <= before.last_trade->event_sequence ||
+            after.prices.timestamp.nanoseconds != 10 || after.last_trade->timestamp.nanoseconds != 10 ||
+            !remainder || remainder->remaining_quantity.units() != 4 ||
+            !exchange.book().check_invariants()) return false;
+        if (!failed) break;
+    }
+    return true;
+}
+
 bool test_best_price_allocations() {
     using namespace marketlab;
     const std::array participants{ParticipantId{1}};
     Exchange exchange{Instrument{{1}, "TEST", TickSize::from_decimal(1, 0).value()}, participants};
     allocations_before_failure = 0;
     const auto empty = best_prices(exchange);
+    const auto empty_market = market_snapshot(exchange);
     const auto empty_spread = empty.spread_ticks();
     const auto empty_mid = empty.mid_price();
     allocations_before_failure = -1;
-    if (empty.bid || empty.ask || empty_spread || empty_mid || empty.timestamp.nanoseconds != 0 ||
+    if (empty_market.last_trade || empty_market.prices.bid || empty_market.prices.ask ||
+        empty.bid || empty.ask || empty_spread || empty_mid || empty.timestamp.nanoseconds != 0 ||
         empty.last_request_sequence.value != 0 || empty.last_event_sequence.value != 0) return false;
     constexpr auto maximum = std::numeric_limits<std::int64_t>::max();
     const OrderRequest bid{{10}, {1}, {1}, {1}, Side::Buy, OrderType::Limit, maximum, 1};
@@ -525,6 +583,10 @@ bool test_cancel_allocations() {
 }
 
 int main() {
+    if (!test_last_trade_allocations()) {
+        std::cerr << "last-trade allocation failure changed state or prevented retry\n";
+        return 1;
+    }
     if (!test_best_price_allocations()) {
         std::cerr << "best-price snapshot allocated or changed exchange state\n";
         return 1;

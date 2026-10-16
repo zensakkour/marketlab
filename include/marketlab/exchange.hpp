@@ -1,6 +1,7 @@
 #pragma once
 
 #include <marketlab/events.hpp>
+#include <marketlab/execution.hpp>
 #include <marketlab/instrument.hpp>
 #include <marketlab/order_book.hpp>
 #include <marketlab/requests.hpp>
@@ -15,6 +16,7 @@
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace marketlab {
@@ -67,6 +69,11 @@ public:
         return last_event_sequence_;
     }
 
+    // Copy the last committed execution; non-trading requests retain it.
+    [[nodiscard]] std::optional<Execution> last_trade() const noexcept {
+        return last_trade_;
+    }
+
     // Capacity errors and allocation exceptions leave all exchange/book state unchanged.
     [[nodiscard]] std::expected<std::vector<ExchangeEvent>, ExchangeError> process_order(
         const OrderRequest& request) {
@@ -112,6 +119,14 @@ public:
             }
             const EventSequence last_event{first_event_sequence.value +
                 static_cast<std::uint64_t>(result->events.size() - 1)};
+            // Book processing has committed; only non-throwing value copies remain.
+            static_assert(std::is_nothrow_assignable_v<std::optional<Execution>&, const Execution&>);
+            for (auto event = result->events.rbegin(); event != result->events.rend(); ++event) {
+                if (const auto* execution = std::get_if<Execution>(&*event)) {
+                    last_trade_ = *execution;
+                    break;
+                }
+            }
             commit_request(event_time, request_sequence, last_event);
             return std::move(result->events);
         } catch (...) {
@@ -208,6 +223,7 @@ private:
     LogicalTime current_time_{};
     RequestSequence last_request_sequence_{};
     EventSequence last_event_sequence_{};
+    std::optional<Execution> last_trade_;
 };
 
 } // namespace marketlab

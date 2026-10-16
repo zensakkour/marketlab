@@ -19,6 +19,8 @@ using namespace marketlab;
 
 static_assert(noexcept(best_prices(std::declval<const Exchange&>())));
 static_assert(!std::is_convertible_v<MidPrice, Price>);
+static_assert(noexcept(market_snapshot(std::declval<const Exchange&>())));
+static_assert(noexcept(std::declval<const Exchange&>().last_trade()));
 static_assert(noexcept(std::declval<const BestPrices&>().spread_ticks()));
 static_assert(noexcept(std::declval<const BestPrices&>().mid_price()));
 constexpr BestPrices half_tick{{1}, {0}, {0}, {0}, Price::from_ticks(100), Price::from_ticks(101)};
@@ -217,8 +219,94 @@ void test_simulation_read_boundaries() {
         "previous simulation snapshot changed after cancel");
 }
 
+bool same_trade(const Execution& a, const Execution& b) {
+    return a.timestamp == b.timestamp && a.event_sequence == b.event_sequence &&
+        a.request_sequence == b.request_sequence && a.instrument_id == b.instrument_id &&
+        a.aggressive_order_id == b.aggressive_order_id && a.resting_order_id == b.resting_order_id &&
+        a.aggressive_side == b.aggressive_side && a.buyer_id == b.buyer_id && a.seller_id == b.seller_id &&
+        a.price == b.price && a.quantity == b.quantity;
+}
+
+void test_last_trade() {
+    const std::array participants{ParticipantId{1}, ParticipantId{2}};
+    Exchange exchange{Instrument{{1}, "TEST", TickSize::from_decimal(1, 0).value()}, participants};
+    require(!exchange.last_trade() && !market_snapshot(exchange).last_trade, "initial last trade is present");
+    require(exchange.process_order(limit(1, Side::Sell, 101, 2, 1, 2)).has_value(), "first ask failed");
+    require(exchange.process_order(limit(2, Side::Sell, 102, 5, 1, 2)).has_value(), "second ask failed");
+    require(!exchange.last_trade(), "passive order created a trade");
+    const auto first = exchange.process_order(limit(3, Side::Buy, 102, 4, 2));
+    require(first && first->size() == 7, "two-level fill failed");
+    const Execution expected{{2}, {9}, {3}, {1}, {3}, {2}, Side::Buy, {1}, {2},
+        Price::from_ticks(102).value(), Quantity::from_units(2).value()};
+    const auto saved = market_snapshot(exchange);
+    require(saved.last_trade && same_trade(*saved.last_trade, expected) &&
+        same_trade(*exchange.last_trade(), expected), "last trade is not the final execution");
+    require(saved.prices.timestamp.nanoseconds == 2 && saved.prices.last_event_sequence.value == 11 &&
+        saved.prices.ask->ticks() == 102 && !saved.prices.bid, "trade snapshot metadata or prices differ");
+    require(exchange.process_cancel(CancelRequest{{3}, {1}, {2}, {2}}).has_value(), "trade remainder cancel failed");
+    const OrderRequest expired{{4}, {1}, {1}, {4}, Side::Buy, OrderType::Market, 1, std::nullopt};
+    require(exchange.process_order(expired).has_value(), "empty market failed");
+    const auto rejected = exchange.process_order(limit(5, Side::Buy, 100, 0, 5));
+    require(rejected && std::holds_alternative<OrderRejected>(rejected->front()), "invalid order not rejected");
+    require(exchange.process_cancel(CancelRequest{{6}, {1}, {1}, {99}}).has_value(), "inactive cancel failed");
+    require(exchange.process_order(limit(6, Side::Buy, 100, 1, 5)).has_value(), "backward rejection failed");
+    const auto later = market_snapshot(exchange);
+    require(later.last_trade && same_trade(*later.last_trade, expected) &&
+        later.prices.timestamp.nanoseconds == 6 && later.last_trade->timestamp.nanoseconds == 2 &&
+        !later.prices.bid && !later.prices.ask, "non-trading requests changed last trade");
+
+    // Exact maximum values and the permitted self-match retain both counterparties.
+    constexpr auto maximum = std::numeric_limits<std::int64_t>::max();
+    require(exchange.process_order(limit(7, Side::Buy, maximum, maximum, 6)).has_value(), "maximum bid failed");
+    const OrderRequest sell{{6}, {1}, {1}, {8}, Side::Sell, OrderType::Market, maximum, std::nullopt};
+    const auto second = exchange.process_order(sell);
+    require(second && exchange.last_trade(), "self-match market sell failed");
+    const auto& final_execution = std::get<Execution>((*second)[1]);
+    require(same_trade(*exchange.last_trade(), final_execution) &&
+        final_execution.aggressive_side == Side::Sell && final_execution.price.ticks() == maximum &&
+        final_execution.quantity.units() == maximum && final_execution.buyer_id == final_execution.seller_id,
+        "last trade lost sell, self-match or boundary fields");
+    require(saved.last_trade && same_trade(*saved.last_trade, expected) && saved.prices.ask->ticks() == 102,
+        "owned trade snapshot changed after later requests");
+    require(exchange.book().check_invariants(), "trade projection changed book invariants");
+
+    const auto detached = [&] {
+        Exchange temporary{Instrument{{1}, "TEST", TickSize::from_decimal(1, 0).value()}, participants};
+        require(temporary.process_order(limit(1, Side::Buy, 1, 1)).has_value(), "detached bid failed");
+        require(temporary.process_order(limit(2, Side::Sell, 1, 1)).has_value(), "detached trade failed");
+        return market_snapshot(temporary);
+    }();
+    require(detached.last_trade && detached.last_trade->price.ticks() == 1 &&
+        detached.last_trade->quantity.units() == 1, "trade snapshot depends on source lifetime");
+}
+
+void test_scheduled_trade() {
+    const std::array participants{ParticipantId{1}};
+    Simulation simulation{Instrument{{1}, "TEST", TickSize::from_decimal(1, 0).value()}, participants};
+    require(simulation.schedule(limit(1, Side::Sell, 100, 3, 1)).has_value() &&
+        simulation.schedule(limit(2, Side::Buy, 100, 2, 2)).has_value() &&
+        simulation.schedule(limit(3, Side::Buy, 100, 1, 2)).has_value(), "trade scheduling failed");
+    require(!market_snapshot(simulation.exchange()).last_trade, "future trade leaked into snapshot");
+    require(simulation.step().has_value() && !simulation.exchange().last_trade(), "passive step created trade");
+    require(simulation.step().has_value(), "first trade step failed");
+    const auto first = market_snapshot(simulation.exchange());
+    require(first.last_trade && first.last_trade->quantity.units() == 2 &&
+        first.last_trade->timestamp.nanoseconds == 2, "first scheduled trade differs");
+    require(simulation.step().has_value(), "second trade step failed");
+    const auto second = market_snapshot(simulation.exchange());
+    require(second.last_trade && second.last_trade->timestamp == first.last_trade->timestamp &&
+        second.last_trade->event_sequence > first.last_trade->event_sequence &&
+        second.last_trade->quantity.units() == 1 && first.last_trade->quantity.units() == 2,
+        "equal-time trades lost event ordering or snapshot ownership");
+    const auto empty = simulation.step();
+    require(empty && !*empty && same_trade(*simulation.exchange().last_trade(), *second.last_trade),
+        "empty step changed last trade");
+}
+
 int main() {
     try {
+        test_last_trade();
+        test_scheduled_trade();
         test_price_transitions();
         test_bid_price_transitions();
         test_rejections_and_boundaries();

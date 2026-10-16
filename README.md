@@ -43,7 +43,8 @@ quantities with checked subtraction, distinct order/participant/instrument IDs,
 order sides/types, logical timestamps, instrument tick configuration,
 order/cancel requests, accepted/resting orders, executions, exchange events,
 exact text event recording, scheduled request records, an owning arrival queue
-and simulation delivery, owned best-price snapshots with exact spread/midpoint,
+and simulation delivery, owned market snapshots with exact spread/midpoint and
+last trade,
 passive order-book storage, single-match limit fills,
 read-only limit match counting, complete accepted-order processing for limits and
 markets, active-order lookup, owned-order cancellation, and raw order/cancel
@@ -138,6 +139,12 @@ Pending simulation arrivals are excluded. `spread_ticks()` returns ask minus bid
 when a side is missing, and neither allocates or rounds. For bid 100 / ask 101,
 spread is 1 and mid is `{100, true}` (100.5 ticks). Arithmetic stays exact near
 INT64_MAX. See [market data](docs/market-data.md) for fields and current scope.
+
+`market_snapshot(exchange)` combines those prices with an owned optional last
+`Execution`. `Exchange::last_trade()` also copies the last execution directly.
+The final execution sequence determines the last trade, including equal-time
+fills. Non-trading requests retain it; failures preserve it. Its trade timestamp
+may precede current snapshot time. Both reads are non-allocating and `noexcept`.
 
 The matching contract is in [docs/matching-semantics.md](docs/matching-semantics.md).
 `OrderBook` owns passive resting limits for one nonzero instrument ID. It stores
@@ -279,8 +286,9 @@ Currently there are twenty-one registered tests: `price`, `domain`, `requests`, 
 nonzero exit code on failure.
 
 `market_data` verifies best prices and metadata after book transitions, retained
-snapshots, exact spread/midpoint arithmetic, numerical boundaries, rejections and
-scheduled delivery. Generated workloads compare snapshots against the independent execution ledger; allocation
+snapshots, last executions, exact spread/midpoint arithmetic, numerical boundaries,
+rejections and scheduled delivery. Generated workloads compare snapshots against
+the independent execution ledger; allocation
 tests verify projection reads with allocation failure armed.
 
 `event_record` checks all nine exact output lines, raw rejection fields, integer
@@ -341,7 +349,8 @@ cmake -S . -B build/debug -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -
 ### Run an executable directly
 
 The runnable targets exercise domain types, book operations, and raw order/cancel
-processing. A simulation executable will be added with end-to-end scenarios.
+processing. `simulation_delivery_tests` also runs a complete scripted timeline
+and can print its events or market snapshots using the options below.
 CTest is the usual way to run tests; you can also run any test directly after
 building.
 
@@ -483,8 +492,39 @@ echo $?
 ```
 
 Exit code 0 means the checks and output succeeded; unknown arguments return 2.
-Without `--record-script`, the executable remains silent on success. Its tests
+With no arguments, the executable remains silent on success. Its tests
 compare recording enabled/disabled logical results and exact output lines.
+
+### Inspect the scripted market snapshots
+
+The same six-arrival scenario can display a market snapshot after each completed
+step, including best prices, spread, exact mid and the last trade:
+
+```powershell
+cmake --build build/debug --target simulation_delivery_tests
+.\build\debug\simulation_delivery_tests.exe --market-script
+$LASTEXITCODE
+```
+
+In a Unix shell:
+
+```sh
+./build/debug/simulation_delivery_tests --market-script
+echo $?
+```
+
+It prints six lines. The third has bid 100 / ask 101, spread 1 and mid 100.5.
+The fourth reports the execution at price 101, size 2, trade time 3 and event
+sequence 8. The last two retain that trade while cancellations advance snapshot
+time/counters and remove the ask. Missing values print `none`; prices are integer
+ticks and time is logical nanoseconds. This is a readable scenario example; the
+versioned event record remains the documented recording format.
+
+Both output modes run the normal integration checks first. Exit code 0 means
+checks and output succeeded; 1 reports failure and 2 reports invalid arguments.
+With no arguments, the executable remains silent on success. CTest compares all
+six literal snapshot lines across twenty fresh replays and checks that observing
+and recording the scenario preserve its event stream and final book.
 
 ### Reproduce a generated workload
 

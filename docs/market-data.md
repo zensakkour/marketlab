@@ -55,12 +55,48 @@ const auto mid = quote.mid_price();
 // Check the optionals before reading mid->whole_ticks and mid->half_tick.
 ```
 
+## Last trade and combined snapshot
+
+`Exchange::last_trade() noexcept` returns an owned optional `Execution`.
+It is empty before the first execution. After a request that executes, it retains
+the final execution in that request's committed event sequence. Multiple fills
+at one timestamp therefore retain event ordering, rather than choosing by time,
+price, order ID or quantity. Both aggressive sides and permitted self-matches
+use the existing execution contract.
+
+Passive orders, cancellations, rejections and markets with no fills preserve
+the last trade. A market remainder expiry after fills also preserves the final
+execution. Engine errors and allocation exceptions preserve the previously
+committed trade along with the book, clock and counters.
+
+The exchange owns this derived record because completed fills may remove their
+source orders. It copies from its validated execution output after book processing
+succeeds; the copy allocates nothing and cannot throw. There is no public setter,
+separate feed or independently writable market state.
+
+`market_snapshot(exchange) noexcept` returns `MarketSnapshot{prices, last_trade}`.
+The `prices` member is the same owned `BestPrices` projection described above.
+Both members are read at one completed request boundary under the single writer.
+Snapshot metadata describes current committed processing; the execution retains
+its own original trade timestamp and request/event sequences. An empty book can
+still have a last trade. All returned values survive source mutation/destruction.
+
+```cpp
+const auto market = marketlab::market_snapshot(simulation.exchange());
+if (market.last_trade) {
+    const auto ticks = market.last_trade->price.ticks();
+    const auto units = market.last_trade->quantity.units();
+    // Consume this execution's exact price and size.
+}
+```
+
 ## Current scope
 
-This API publishes prices and committed-state metadata. It does not expose the
+These APIs publish prices, last execution and committed-state metadata. They do
+not expose the
 FIFO head's remaining quantity as a price-level total: those are different values.
 Aggregated quantities need checked arithmetic for multiple maximum-size orders.
-Depth, last trade and cumulative volume are subsequent Phase 7 work.
+Depth and cumulative volume remain subsequent Phase 7 work.
 
 `market_data` checks empty/one-sided/two-sided books, passive price changes,
 same-price FIFO survivors, partial and full fills, multi-level fills, cancellation,
@@ -71,5 +107,12 @@ INT64_MAX, including adjacent maximum prices.
 after every generated request, including derived spread/midpoint values. Allocation
 tests read empty and populated snapshots and compute derived values with the next
 allocation forced to fail.
+
+Last-trade checks cover multi-level fills, both sides, self-matches, exact maximum
+price/size, equal-time executions, retained values after source destruction,
+non-trading requests, scheduled delivery and allocation-failure retry. Generated
+workloads compare every last-trade field to the reconciled execution ledger.
+The scripted CLI exposes six tested observations; see the README's
+[market snapshot example](../README.md#inspect-the-scripted-market-snapshots).
 
 Build and run the tests using the [README](../README.md#build-run-and-test).
