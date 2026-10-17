@@ -20,7 +20,8 @@ endforeach()
 include(CTest)
 if(BUILD_TESTING)
     foreach(test_name IN ITEMS price aggregate_quantity unsigned_product cash_amount
-                               domain instrument_registry multi_instrument multi_instrument_allocation
+                               domain instrument_registry worker_assignment_plan
+                               multi_instrument multi_instrument_allocation
                                requests orders events
                                event_record market_data time_weighted_spread
                                participant_ledger participant_ledger_allocation

@@ -136,5 +136,6 @@ Construction and processing allocation injection covers identical retry and
 unchanged foreign state. The example's exact summary/checksum and twenty replays
 cover cross-instrument equal-time arrivals and independently retained results.
 
-This completes single-writer routing/isolation. Worker assignment and concurrent
-delivery belong to Phase12; no multithreading or throughput result is claimed.
+This completes single-writer routing/isolation. Phase 12 begins with a fixed
+[worker assignment plan](worker-ownership.md); concurrent delivery remains future
+work. No multithreading or throughput result is claimed.

@@ -50,7 +50,9 @@ demo and regression fixture. Phase 11 adds an immutable
 [instrument registry](docs/instrument-configuration.md) and
 [single-writer multi-instrument routing](docs/multi-instrument-exchange.md),
 with independent books, clocks, counters, market data and accounting.
-Worker ownership across threads is the next roadmap phase.
+Phase 12 begins with a validated, immutable
+[instrument-to-worker assignment plan](docs/worker-ownership.md). Worker execution,
+ingress queues and lifecycle remain the next steps.
 
 ## Build, run, and test
 
@@ -84,6 +86,14 @@ exchange for existing market-data projections. `Exchange::instrument()` borrows
 its immutable symbol/tick configuration without allocation. Caller-owned ledgers
 remain separate per instrument; the existing `Simulation` remains mono-instrument.
 See [multi-instrument routing](docs/multi-instrument-exchange.md).
+
+`WorkerAssignmentPlan(registry, worker_count, assignments)` copies one explicit
+`InstrumentWorkerAssignment{instrument_id, worker_index}` per instrument. It
+requires a positive worker count and indexes in `[0, worker_count)`; missing,
+unknown and duplicate assignments are refused. Idle workers are allowed.
+`worker_for(id)` returns an optional index, and `assignments()` borrows a sorted
+const span; reads allocate nothing. This is fixed configuration for future worker
+ownership. See [worker assignment](docs/worker-ownership.md).
 
 For v0, a participant is represented by its `ParticipantId`. Orders and executions
 carry that identity directly. Participant registration belongs to fixed
@@ -383,9 +393,9 @@ build files; building compiles the test executables; CTest runs them. Tests are
 enabled explicitly, and compiler warnings are treated as errors.
 
 A successful test run ends with `100% tests passed, 0 tests failed`.
-Currently there are thirty-nine registered tests: `price`, `aggregate_quantity`,
+Currently there are forty registered tests: `price`, `aggregate_quantity`,
 `unsigned_product`, `cash_amount`,
-`domain`, `instrument_registry`, `multi_instrument`,
+`domain`, `instrument_registry`, `worker_assignment_plan`, `multi_instrument`,
 `multi_instrument_allocation`, `requests`, `orders`,
 `events`, `event_record`, `market_data`, `time_weighted_spread`, `participant_ledger`,
 `participant_ledger_allocation`, `participant_pnl`, `participant_fills`, `order_id_source`,
@@ -402,6 +412,10 @@ nonzero exit code on failure.
 `instrument_registry` checks copied ownership, sorted lookup/views, boundary
 IDs/tick sizes, duplicate/invalid definitions, constructor allocation failure
 and retry, and allocation-free reads.
+
+`worker_assignment_plan` checks complete mappings, invalid bindings, idle workers,
+input-order independence, owned storage, boundary indexes, construction failure
+and retry, and non-allocating queries.
 
 `multi_instrument` compares every routed request against isolated exchanges,
 checks instrument-local time/IDs/counters, unknown routing and ledger isolation,
@@ -720,6 +734,8 @@ $LASTEXITCODE
 $LASTEXITCODE
 .\build\debug\instrument_registry_tests.exe
 $LASTEXITCODE
+.\build\debug\worker_assignment_plan_tests.exe
+$LASTEXITCODE
 .\build\debug\multi_instrument_tests.exe
 $LASTEXITCODE
 .\build\debug\multi_instrument_allocation_tests.exe
@@ -802,6 +818,8 @@ echo $?
 ./build/debug/domain_tests
 echo $?
 ./build/debug/instrument_registry_tests
+echo $?
+./build/debug/worker_assignment_plan_tests
 echo $?
 ./build/debug/multi_instrument_tests
 echo $?
@@ -1077,14 +1095,14 @@ These generated workloads validate correctness.
 ### GCC checked-container tests
 
 GCC/libstdc++ can also check container and iterator operations at runtime in a
-separate build. These commands build and run thirty-four tests covering controlled
-participants, accounting,
+separate build. These commands build and run thirty-five tests covering worker
+assignment, controlled participants, accounting,
 exact aggregates, market data, recording, simulation, books and the exchange:
 
 ```powershell
 cmake -S . -B build/checked -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DCMAKE_CXX_FLAGS=-D_GLIBCXX_DEBUG
-cmake --build build/checked --target instrument_registry_tests multi_instrument_tests multi_instrument_allocation_tests order_id_source_tests simulation_random_tests scripted_participant_tests participant_plans_tests participant_allocation_tests participant_integration_tests market_making_tests time_weighted_spread_tests unsigned_product_tests cash_amount_tests participant_ledger_tests participant_ledger_allocation_tests participant_pnl_tests participant_fills_tests aggregate_quantity_tests event_record_tests market_data_tests simulation_tests simulation_queue_tests simulation_queue_allocation_tests simulation_delivery_tests order_book_tests order_book_allocation_tests order_book_matching_tests order_book_limit_tests order_book_cancel_tests order_book_market_tests order_book_invariant_tests exchange_tests exchange_scenario_tests exchange_property_tests
-ctest --test-dir build/checked --output-on-failure -R "^(instrument_registry|multi_instrument(_allocation)?|order_id_source|simulation_random|scripted_participant|participant_(plans|allocation|integration)|unsigned_product|cash_amount|participant_ledger(_allocation)?|participant_pnl|participant_fills|aggregate_quantity|event_record|market_data|time_weighted_spread|market_making|simulation(_queue(_allocation)?|_delivery)?|order_book(_allocation|_matching|_limit|_cancel|_market|_invariant)?|exchange(_scenario|_property)?)$"
+cmake --build build/checked --target instrument_registry_tests worker_assignment_plan_tests multi_instrument_tests multi_instrument_allocation_tests order_id_source_tests simulation_random_tests scripted_participant_tests participant_plans_tests participant_allocation_tests participant_integration_tests market_making_tests time_weighted_spread_tests unsigned_product_tests cash_amount_tests participant_ledger_tests participant_ledger_allocation_tests participant_pnl_tests participant_fills_tests aggregate_quantity_tests event_record_tests market_data_tests simulation_tests simulation_queue_tests simulation_queue_allocation_tests simulation_delivery_tests order_book_tests order_book_allocation_tests order_book_matching_tests order_book_limit_tests order_book_cancel_tests order_book_market_tests order_book_invariant_tests exchange_tests exchange_scenario_tests exchange_property_tests
+ctest --test-dir build/checked --output-on-failure -R "^(instrument_registry|worker_assignment_plan|multi_instrument(_allocation)?|order_id_source|simulation_random|scripted_participant|participant_(plans|allocation|integration)|unsigned_product|cash_amount|participant_ledger(_allocation)?|participant_pnl|participant_fills|aggregate_quantity|event_record|market_data|time_weighted_spread|market_making|simulation(_queue(_allocation)?|_delivery)?|order_book(_allocation|_matching|_limit|_cancel|_market|_invariant)?|exchange(_scenario|_property)?)$"
 ```
 
 Keep this build separate: the flag changes standard-container layouts, so code
