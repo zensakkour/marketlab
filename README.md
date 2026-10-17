@@ -46,7 +46,8 @@ reports. See
 [participant accounting](docs/participant-accounting.md) and
 [controlled participants](docs/controlled-participants.md) for the current scope.
 The [reference experiment](docs/reference-market-making.md) is a reproducible
-demo and regression fixture. Multiple instruments are the next roadmap phase.
+demo and regression fixture. Phase 11 starts with an immutable
+[instrument registry](docs/instrument-configuration.md); multi-book routing is next.
 
 ## Build, run, and test
 
@@ -65,6 +66,13 @@ quantity/cash-flow accounting with failure-atomic execution batches and history 
 Logical timestamps count unsigned 64-bit nanoseconds from the simulation origin.
 Tick sizes use a positive decimal coefficient and a scale from 0 through 18;
 instrument configuration requires a nonzero ID and a nonempty symbol.
+
+`InstrumentRegistry` owns a fixed copied instrument list. It rejects invalid
+records and duplicate IDs, provides non-allocating lookup with `find(id)` and
+a read-only `instruments()` span in increasing ID order. Borrowed records remain
+valid until destruction. The registry contains configuration; books, routing,
+clock/sequence scope and per-instrument accounting remain the next Phase 11 work.
+See [instrument configuration](docs/instrument-configuration.md).
 
 For v0, a participant is represented by its `ParticipantId`. Orders and executions
 carry that identity directly. Participant registration belongs to fixed
@@ -364,9 +372,9 @@ build files; building compiles the test executables; CTest runs them. Tests are
 enabled explicitly, and compiler warnings are treated as errors.
 
 A successful test run ends with `100% tests passed, 0 tests failed`.
-Currently there are thirty-six registered tests: `price`, `aggregate_quantity`,
+Currently there are thirty-seven registered tests: `price`, `aggregate_quantity`,
 `unsigned_product`, `cash_amount`,
-`domain`, `requests`, `orders`,
+`domain`, `instrument_registry`, `requests`, `orders`,
 `events`, `event_record`, `market_data`, `time_weighted_spread`, `participant_ledger`,
 `participant_ledger_allocation`, `participant_pnl`, `participant_fills`, `order_id_source`,
 `simulation_random`, `scripted_participant`, `participant_plans`,
@@ -378,6 +386,10 @@ Currently there are thirty-six registered tests: `price`, `aggregate_quantity`,
 `exchange`, `exchange_scenario`, and `exchange_property`.
 `--output-on-failure` prints diagnostics from failing tests, and CTest returns a
 nonzero exit code on failure.
+
+`instrument_registry` checks copied ownership, sorted lookup/views, boundary
+IDs/tick sizes, duplicate/invalid definitions, constructor allocation failure
+and retry, and allocation-free reads.
 
 `aggregate_quantity` checks exact 128-bit decimal boundaries, checked overflow,
 constexpr operations and 10,000 generated additions against independent decimal
@@ -644,6 +656,8 @@ $LASTEXITCODE
 $LASTEXITCODE
 .\build\debug\domain_tests.exe
 $LASTEXITCODE
+.\build\debug\instrument_registry_tests.exe
+$LASTEXITCODE
 .\build\debug\requests_tests.exe
 $LASTEXITCODE
 .\build\debug\orders_tests.exe
@@ -720,6 +734,8 @@ echo $?
 ./build/debug/cash_amount_tests
 echo $?
 ./build/debug/domain_tests
+echo $?
+./build/debug/instrument_registry_tests
 echo $?
 ./build/debug/requests_tests
 echo $?
@@ -991,14 +1007,14 @@ These generated workloads validate correctness.
 ### GCC checked-container tests
 
 GCC/libstdc++ can also check container and iterator operations at runtime in a
-separate build. These commands build and run thirty-one tests covering controlled
+separate build. These commands build and run thirty-two tests covering controlled
 participants, accounting,
 exact aggregates, market data, recording, simulation, books and the exchange:
 
 ```powershell
 cmake -S . -B build/checked -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DCMAKE_CXX_FLAGS=-D_GLIBCXX_DEBUG
-cmake --build build/checked --target order_id_source_tests simulation_random_tests scripted_participant_tests participant_plans_tests participant_allocation_tests participant_integration_tests market_making_tests time_weighted_spread_tests unsigned_product_tests cash_amount_tests participant_ledger_tests participant_ledger_allocation_tests participant_pnl_tests participant_fills_tests aggregate_quantity_tests event_record_tests market_data_tests simulation_tests simulation_queue_tests simulation_queue_allocation_tests simulation_delivery_tests order_book_tests order_book_allocation_tests order_book_matching_tests order_book_limit_tests order_book_cancel_tests order_book_market_tests order_book_invariant_tests exchange_tests exchange_scenario_tests exchange_property_tests
-ctest --test-dir build/checked --output-on-failure -R "^(order_id_source|simulation_random|scripted_participant|participant_(plans|allocation|integration)|unsigned_product|cash_amount|participant_ledger(_allocation)?|participant_pnl|participant_fills|aggregate_quantity|event_record|market_data|time_weighted_spread|market_making|simulation(_queue(_allocation)?|_delivery)?|order_book(_allocation|_matching|_limit|_cancel|_market|_invariant)?|exchange(_scenario|_property)?)$"
+cmake --build build/checked --target instrument_registry_tests order_id_source_tests simulation_random_tests scripted_participant_tests participant_plans_tests participant_allocation_tests participant_integration_tests market_making_tests time_weighted_spread_tests unsigned_product_tests cash_amount_tests participant_ledger_tests participant_ledger_allocation_tests participant_pnl_tests participant_fills_tests aggregate_quantity_tests event_record_tests market_data_tests simulation_tests simulation_queue_tests simulation_queue_allocation_tests simulation_delivery_tests order_book_tests order_book_allocation_tests order_book_matching_tests order_book_limit_tests order_book_cancel_tests order_book_market_tests order_book_invariant_tests exchange_tests exchange_scenario_tests exchange_property_tests
+ctest --test-dir build/checked --output-on-failure -R "^(instrument_registry|order_id_source|simulation_random|scripted_participant|participant_(plans|allocation|integration)|unsigned_product|cash_amount|participant_ledger(_allocation)?|participant_pnl|participant_fills|aggregate_quantity|event_record|market_data|time_weighted_spread|market_making|simulation(_queue(_allocation)?|_delivery)?|order_book(_allocation|_matching|_limit|_cancel|_market|_invariant)?|exchange(_scenario|_property)?)$"
 ```
 
 Keep this build separate: the flag changes standard-container layouts, so code
