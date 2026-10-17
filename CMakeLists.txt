@@ -7,13 +7,22 @@ add_library(marketlab INTERFACE)
 target_include_directories(marketlab INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(marketlab INTERFACE cxx_std_23)
 
+add_executable(controlled_market examples/controlled_market.cpp)
+target_link_libraries(controlled_market PRIVATE marketlab)
+if(MSVC)
+    target_compile_options(controlled_market PRIVATE /W4 /WX)
+else()
+    target_compile_options(controlled_market PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
+
 include(CTest)
 if(BUILD_TESTING)
     foreach(test_name IN ITEMS price aggregate_quantity unsigned_product cash_amount
                                domain requests orders events event_record market_data
                                participant_ledger participant_ledger_allocation participant_pnl
-                               simulation simulation_queue simulation_queue_allocation
-                               simulation_delivery
+                               order_id_source simulation_random scripted_participant
+                               participant_plans participant_allocation participant_integration
+                               simulation simulation_queue simulation_queue_allocation simulation_delivery
                                order_book order_book_allocation order_book_matching
                                order_book_limit order_book_cancel order_book_market
                                order_book_invariant exchange exchange_scenario exchange_property)

@@ -38,9 +38,12 @@ Development is organized around small, validated implementation steps. After eac
 
 Phase 8 accounting now covers execution history, bought/sold volumes, exact net
 positions, cash flows and FIFO realised/unrealised/total PnL at caller-supplied
-prices in a separate participant ledger. Controlled synthetic participants are next. See
-[participant accounting](docs/participant-accounting.md) for the implemented
-contract and examples.
+prices in a separate participant ledger. Phase 9 now includes owning scripted
+participants, controlled noise, refreshed liquidity and market-order taker plans,
+with a seeded standalone example. The next phase is the reference market-making
+experiment. See
+[participant accounting](docs/participant-accounting.md) and
+[controlled participants](docs/controlled-participants.md) for the current scope.
 
 ## Build, run, and test
 
@@ -64,7 +67,8 @@ For v0, a participant is represented by its `ParticipantId`. Orders and executio
 carry that identity directly. Participant registration belongs to fixed
 `Exchange` configuration. `ParticipantLedger` owns downstream execution history,
 gross volumes, net positions and cash flows. FIFO projections derive realised,
-unrealised and total PnL from history; strategy behavior remains later work.
+unrealised and total PnL from history. Controlled request producers prepare
+scripts outside the exchange; reactive strategies remain later work.
 
 Submitted order quantities must be positive; zero is supported for remaining
 quantities after a complete fill. Requests retain raw quantity and tick-price
@@ -200,6 +204,26 @@ temporary lots on demand; allocation may throw without changing ledger state.
 `PnlAmount` is the shared exact sign/magnitude type; `TotalPnl` remains an alias.
 Funding, solvency checks and fees remain outside these APIs.
 
+`SimulationRandom(seed)` supplies reproducible inclusive integer samples via
+`uniform(minimum, maximum)`, using rejection sampling without floating point.
+Invalid/singleton ranges consume no random word; a full uint64 range is supported.
+`OrderIdSource(first)` supplies consecutive client order IDs through `next()` and
+non-consuming `peek()`. Zero is invalid; UINT64_MAX is usable once, then the source
+reports exhaustion. The experiment owns both sources. Copies are checkpoints,
+not disjoint streams or ID namespaces; use one coordinated ID source per exchange.
+Neither source changes exchange sequences or bypasses duplicate validation.
+
+`ScriptedParticipant(id, span)` owns one participant's ordered request list and
+schedules one action at a time, advancing only on successful insertion.
+`make_noise_script()`, `make_liquidity_script()` and `make_taker_script()`
+prepare bounded plans around explicit configuration. Noise uses uniform integer
+gaps, quantities and price distances with buy/cancel probabilities; the provider
+cancels its previous quotes before refreshing fixed-reference bid/ask pairs;
+the taker submits markets. Plan failures preserve caller RNG/ID state for retry.
+Scripts preserve raw exchange validation and equal-time insertion priority.
+See [controlled participants](docs/controlled-participants.md) for all fields,
+random draw order, ownership, cancellation behavior and failure guarantees.
+
 The matching contract is in [docs/matching-semantics.md](docs/matching-semantics.md).
 `OrderBook` owns passive resting limits for one nonzero instrument ID. It stores
 ordered price levels with FIFO queues and tracks active IDs. `insert_passive()`
@@ -302,7 +326,7 @@ fills and state commitment. `book()` exposes only a borrowed const view; reacqui
 resting-order pointers after processing. `current_time()`, `last_request_sequence()`,
 and `last_event_sequence()` expose committed state (both sequences start at zero
 before the first request). One writer processes calls without callbacks.
-Participant behavior, modeled latency and the decimal price adapter
+Reactive strategy behavior, modeled latency and the decimal price adapter
 remain future work.
 
 ### Requirements
@@ -330,11 +354,14 @@ build files; building compiles the test executables; CTest runs them. Tests are
 enabled explicitly, and compiler warnings are treated as errors.
 
 A successful test run ends with `100% tests passed, 0 tests failed`.
-Currently there are twenty-seven registered tests: `price`, `aggregate_quantity`,
+Currently there are thirty-three registered tests: `price`, `aggregate_quantity`,
 `unsigned_product`, `cash_amount`,
 `domain`, `requests`, `orders`,
 `events`, `event_record`, `market_data`, `participant_ledger`,
-`participant_ledger_allocation`, `participant_pnl`, `simulation`, `simulation_queue`,
+`participant_ledger_allocation`, `participant_pnl`, `order_id_source`,
+`simulation_random`, `scripted_participant`, `participant_plans`,
+`participant_allocation`, `participant_integration`,
+`simulation`, `simulation_queue`,
 `simulation_queue_allocation`,
 `simulation_delivery`, `order_book`, `order_book_allocation`, `order_book_matching`,
 `order_book_limit`, `order_book_cancel`, `order_book_market`, `order_book_invariant`,
@@ -367,6 +394,18 @@ verifies one-time retry from retained, already committed simulation executions.
 Generated workloads also compare cash, positions and total PnL at three marks
 to independent decimal arithmetic
 and replay their full execution history.
+`simulation_random` checks seed replay, full-range engine agreement, exact
+power-of-two mapping, rejection-sequence goldens and bounded sampling.
+`order_id_source` checks zero rejection, configurable starts, non-consuming reads,
+checkpoints and final-ID exhaustion without wrap.
+
+`scripted_participant` checks ownership, copied requests, equal-time order, raw
+validation and scheduling retry. `participant_plans` checks plan policies,
+shared IDs, seeded replay, bounds and failure rollback. `participant_allocation`
+injects each plan allocation failure and checks script construction/scheduling
+retry. `participant_integration` repeats four seeds, compares exact event bytes
+and the default summary, and independently reconstructs accounts and final depth.
+
 `participant_pnl` checks FIFO lot selection, long/short closes and reversals,
 self-matches, owned results, full-width amounts and 1,000 generated executions
 against an independent unit-lot/decimal oracle. Allocation tests exercise every
@@ -427,6 +466,60 @@ If an older local build cached that flag, reset its extra compiler flags once:
 cmake -S . -B build/debug -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DCMAKE_CXX_FLAGS=""
 ```
 
+### Run the controlled market
+
+`controlled_market` is a standalone executable, available with tests enabled
+or disabled. It runs a fixed-reference liquidity provider, noise flow and a
+market-order taker through the normal simulation and execution-accounting path.
+
+In PowerShell, after the Debug build:
+
+```powershell
+.\build\debug\controlled_market.exe
+$LASTEXITCODE
+.\build\debug\controlled_market.exe 123
+$LASTEXITCODE
+.\build\debug\controlled_market.exe --events 42 | Set-Content -Encoding ascii -ErrorAction Stop .\build\debug\controlled-events.log
+$LASTEXITCODE
+```
+
+In a Unix shell:
+
+```sh
+./build/debug/controlled_market
+./build/debug/controlled_market 123
+./build/debug/controlled_market --events 42 > build/debug/controlled-events.log
+```
+
+The default seed is 42. Custom seeds accept decimal digits from 0 through
+UINT64_MAX. The default output has five lines: aggregate counts, three
+participant accounts with FIFO PnL, and final depth. Its first line is:
+
+```text
+seed=42 instrument_id=1 mark_ticks=100 requests=120 events=317 orders=93 cancellations=27 executions=45 time_ns=350 volume_units=91 bid_ticks=99 ask_ticks=101
+```
+
+At the explicit mark of 100 ticks, final positions are +8, +5 and -13,
+cash flows are -720, -445 and +1165, and total PnLs are +80, +55 and -135.
+Amounts use exact tick-times-quantity units. Order/cancel counts include rejected
+attempts. `--events` prints the 317 existing v1 event records for seed 42 instead
+of the summary. The seed and ordered producer calls determine reproducibility.
+See [configuration and scheduling order](docs/controlled-participants.md#integrated-executable-and-regression).
+
+Exit codes are 0 for success, 1 for run/output failure and 2 for invalid
+arguments. Negative, fractional, out-of-range or extra arguments are refused.
+To build just the example in a separate directory without tests:
+
+```powershell
+cmake -S . -B build/example-only -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+cmake --build build/example-only --target controlled_market
+.\build\example-only\controlled_market.exe 42
+```
+
+On Unix, run `./build/example-only/controlled_market 42`.
+The example validates Phase 9 participants. The next phase adds the formal
+reference market-making experiment and its duration/spread report.
+
 ### Run an executable directly
 
 The runnable targets exercise domain types, book operations, and raw order/cancel
@@ -463,6 +556,18 @@ $LASTEXITCODE
 .\build\debug\participant_ledger_allocation_tests.exe
 $LASTEXITCODE
 .\build\debug\participant_pnl_tests.exe
+$LASTEXITCODE
+.\build\debug\order_id_source_tests.exe
+$LASTEXITCODE
+.\build\debug\simulation_random_tests.exe
+$LASTEXITCODE
+.\build\debug\scripted_participant_tests.exe
+$LASTEXITCODE
+.\build\debug\participant_plans_tests.exe
+$LASTEXITCODE
+.\build\debug\participant_allocation_tests.exe
+$LASTEXITCODE
+.\build\debug\participant_integration_tests.exe
 $LASTEXITCODE
 .\build\debug\simulation_tests.exe
 $LASTEXITCODE
@@ -522,6 +627,18 @@ echo $?
 ./build/debug/participant_ledger_allocation_tests
 echo $?
 ./build/debug/participant_pnl_tests
+echo $?
+./build/debug/order_id_source_tests
+echo $?
+./build/debug/simulation_random_tests
+echo $?
+./build/debug/scripted_participant_tests
+echo $?
+./build/debug/participant_plans_tests
+echo $?
+./build/debug/participant_allocation_tests
+echo $?
+./build/debug/participant_integration_tests
 echo $?
 ./build/debug/simulation_tests
 echo $?
@@ -759,13 +876,14 @@ These generated workloads validate correctness.
 ### GCC checked-container tests
 
 GCC/libstdc++ can also check container and iterator operations at runtime in a
-separate build. These commands build and run twenty-two tests covering accounting,
+separate build. These commands build and run twenty-eight tests covering controlled
+participants, accounting,
 exact aggregates, market data, recording, simulation, books and the exchange:
 
 ```powershell
 cmake -S . -B build/checked -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DCMAKE_CXX_FLAGS=-D_GLIBCXX_DEBUG
-cmake --build build/checked --target unsigned_product_tests cash_amount_tests participant_ledger_tests participant_ledger_allocation_tests participant_pnl_tests aggregate_quantity_tests event_record_tests market_data_tests simulation_tests simulation_queue_tests simulation_queue_allocation_tests simulation_delivery_tests order_book_tests order_book_allocation_tests order_book_matching_tests order_book_limit_tests order_book_cancel_tests order_book_market_tests order_book_invariant_tests exchange_tests exchange_scenario_tests exchange_property_tests
-ctest --test-dir build/checked --output-on-failure -R "^(unsigned_product|cash_amount|participant_ledger(_allocation)?|participant_pnl|aggregate_quantity|event_record|market_data|simulation(_queue(_allocation)?|_delivery)?|order_book(_allocation|_matching|_limit|_cancel|_market|_invariant)?|exchange(_scenario|_property)?)$"
+cmake --build build/checked --target order_id_source_tests simulation_random_tests scripted_participant_tests participant_plans_tests participant_allocation_tests participant_integration_tests unsigned_product_tests cash_amount_tests participant_ledger_tests participant_ledger_allocation_tests participant_pnl_tests aggregate_quantity_tests event_record_tests market_data_tests simulation_tests simulation_queue_tests simulation_queue_allocation_tests simulation_delivery_tests order_book_tests order_book_allocation_tests order_book_matching_tests order_book_limit_tests order_book_cancel_tests order_book_market_tests order_book_invariant_tests exchange_tests exchange_scenario_tests exchange_property_tests
+ctest --test-dir build/checked --output-on-failure -R "^(order_id_source|simulation_random|scripted_participant|participant_(plans|allocation|integration)|unsigned_product|cash_amount|participant_ledger(_allocation)?|participant_pnl|aggregate_quantity|event_record|market_data|simulation(_queue(_allocation)?|_delivery)?|order_book(_allocation|_matching|_limit|_cancel|_market|_invariant)?|exchange(_scenario|_property)?)$"
 ```
 
 Keep this build separate: the flag changes standard-container layouts, so code
