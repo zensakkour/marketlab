@@ -40,10 +40,13 @@ Phase 8 accounting now covers execution history, bought/sold volumes, exact net
 positions, cash flows and FIFO realised/unrealised/total PnL at caller-supplied
 prices in a separate participant ledger. Phase 9 now includes owning scripted
 participants, controlled noise, refreshed liquidity and market-order taker plans,
-with a seeded standalone example. The next phase is the reference market-making
-experiment. See
+with a seeded standalone example. Phase 10 adds a four-participant reference
+market-making experiment with exact duration-weighted spread and full accounting
+reports. See
 [participant accounting](docs/participant-accounting.md) and
 [controlled participants](docs/controlled-participants.md) for the current scope.
+The [reference experiment](docs/reference-market-making.md) is a reproducible
+demo and regression fixture. Multiple instruments are the next roadmap phase.
 
 ## Build, run, and test
 
@@ -173,6 +176,13 @@ Totals remain exact above UINT64_MAX; v0 request/order bounds keep them below
 Volume counts each execution once, including self-matches, and excludes all
 unfilled remainders. No quantity is rounded or saturated. See
 [market data](docs/market-data.md) for arithmetic bounds and ownership.
+
+`TimeWeightedSpread` from `<marketlab/time_weighted_spread.hpp>` observes
+explicit timestamp/spread samples without allocation or exchange mutation.
+`observe()` integrates the previous sample; `snapshot(horizon)` projects the
+last state without advancing the observer or exchange. It separates missing-price
+duration and retains the exact two-word tick-nanosecond integral and mean fraction.
+See [spread semantics and bounds](docs/reference-market-making.md#exact-time-weighted-spread).
 
 `ParticipantLedger` from `<marketlab/participant_ledger.hpp>` owns quantity
 accounts for one instrument and fixed participants, initially zero. `apply()`
@@ -354,13 +364,13 @@ build files; building compiles the test executables; CTest runs them. Tests are
 enabled explicitly, and compiler warnings are treated as errors.
 
 A successful test run ends with `100% tests passed, 0 tests failed`.
-Currently there are thirty-three registered tests: `price`, `aggregate_quantity`,
+Currently there are thirty-six registered tests: `price`, `aggregate_quantity`,
 `unsigned_product`, `cash_amount`,
 `domain`, `requests`, `orders`,
-`events`, `event_record`, `market_data`, `participant_ledger`,
-`participant_ledger_allocation`, `participant_pnl`, `order_id_source`,
+`events`, `event_record`, `market_data`, `time_weighted_spread`, `participant_ledger`,
+`participant_ledger_allocation`, `participant_pnl`, `participant_fills`, `order_id_source`,
 `simulation_random`, `scripted_participant`, `participant_plans`,
-`participant_allocation`, `participant_integration`,
+`participant_allocation`, `participant_integration`, `market_making`,
 `simulation`, `simulation_queue`,
 `simulation_queue_allocation`,
 `simulation_delivery`, `order_book`, `order_book_allocation`, `order_book_matching`,
@@ -410,6 +420,19 @@ and the default summary, and independently reconstructs accounts and final depth
 self-matches, owned results, full-width amounts and 1,000 generated executions
 against an independent unit-lot/decimal oracle. Allocation tests exercise every
 FIFO scratch-allocation failure, unchanged history and query retry.
+
+`participant_fills` checks direction/liquidity-role counts, self-matches,
+partial and multi-level fills, unchanged results after refused ingestion, owned
+values, replay and size-independent counting. The existing allocation test checks
+non-allocating reads; integrated seed replay independently reconciles fill roles.
+
+`time_weighted_spread` checks interval weighting, missing/zero/tied samples,
+invalid observations, read-only projections, allocation-free paths, maximum time
+and price ranges and 10,000 independent decimal interval calculations.
+`market_making` verifies the literal summary and event checksum, four repeated
+seeds, exclusive horizons, participant priority, quote refresh and drained-queue
+observation. Independent active-order, unit-lot FIFO and unit-time spread
+oracles reconcile the final report and direct exchange event replay.
 
 `event_record` checks all nine exact output lines, raw rejection fields, integer
 limits, locale/stream-setting independence and output errors. Recording the
@@ -517,8 +540,88 @@ cmake --build build/example-only --target controlled_market
 ```
 
 On Unix, run `./build/example-only/controlled_market 42`.
-The example validates Phase 9 participants. The next phase adds the formal
-reference market-making experiment and its duration/spread report.
+The example validates Phase 9 participants. The separate
+[reference experiment](#run-the-reference-market-making-experiment) adds the
+market maker, exclusive duration and exact spread report.
+
+### Inspect controlled participant fills
+
+```powershell
+.\build\debug\controlled_market.exe --fills 42
+$LASTEXITCODE
+```
+
+On Unix, use `./build/debug/controlled_market --fills 42`.
+Omitting the seed uses 42, as in the other modes. It prints:
+
+```text
+participant_id=1 buy_fills=9 sell_fills=8 aggressive_fills=0 passive_fills=17
+participant_id=2 buy_fills=17 sell_fills=14 aggressive_fills=3 passive_fills=28
+participant_id=3 buy_fills=19 sell_fills=23 aggressive_fills=42 passive_fills=0
+```
+
+A fill counts one participant's leg of an execution, regardless of size or
+whether its order becomes fully filled. A self-match counts one buy, one sell,
+one aggressive and one passive leg for its owner. Across participants the
+45 executions give 45 buys, 45 sells, 45 aggressive and 45 passive fills.
+`participant_fills(ledger, id)` derives owned counts from committed history
+without allocation or mutation. Unknown IDs return an empty optional.
+See [fill-count semantics](docs/participant-accounting.md#participant-fill-counts).
+`--events` and `--fills` are alternative modes; passing both returns exit code 2.
+
+### Run the reference market-making experiment
+
+`market_making` runs four participants for the exclusive logical window
+[0, 500 ns): background liquidity, noise, market-order taker and a market maker.
+The maker quotes at 99/101 ticks, size 5, refreshing every 25 ns.
+Its explicit valuation mark is 100 ticks. Seed 42 is the default.
+
+```powershell
+cmake --build build/debug --target market_making
+.\build\debug\market_making.exe 42
+$LASTEXITCODE
+.\build\debug\market_making.exe --events 42 | Set-Content -Encoding ascii -ErrorAction Stop .\build\debug\market-making-events.log
+$LASTEXITCODE
+```
+
+In a Unix shell:
+
+```sh
+./build/debug/market_making 42
+./build/debug/market_making --events 42 > build/debug/market-making-events.log
+```
+
+The summary has seven lines: totals, spread, four participant reports and depth.
+Its first two lines are:
+
+```text
+seed=42 instrument_id=1 mark_ticks=100 horizon_ns=500 last_time_ns=496 requests=260 pending_requests=34 events=682 orders=186 cancellations=74 trades=99 volume_units=223 bid_ticks=97 ask_ticks=101
+spread_tick_ns=1078 covered_ns=500 missing_ns=0 mean_spread_ticks=1078/500
+```
+
+The market maker ends with position +7, cash flow -577, realised PnL +116,
+unrealised PnL +7 and total PnL +123, in exact tick-times-quantity units.
+The spread is weighted by logical duration and kept as an exact fraction.
+Time without both prices is reported separately. No request at 500 ns is
+processed, no final flattening occurs, and observing through 500 ns leaves
+the exchange's last committed time at 496 ns.
+
+Custom seeds accept decimal digits from 0 through UINT64_MAX. Exit codes are
+0 success, 1 run/output failure, 2 invalid arguments. `--events` exports the
+existing v1 records instead of the summary.
+See [the full reference contract and regression values](docs/reference-market-making.md).
+
+For a clean standalone build without tests:
+
+```powershell
+cmake -S . -B build/reference-only -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+cmake --build build/reference-only --target market_making
+.\build\reference-only\market_making.exe 42
+```
+
+On Unix, run `./build/reference-only/market_making 42`.
+Both examples remain available with `BUILD_TESTING=OFF`.
+The reference is a correctness regression and future benchmark fixture.
 
 ### Run an executable directly
 
@@ -551,11 +654,15 @@ $LASTEXITCODE
 $LASTEXITCODE
 .\build\debug\market_data_tests.exe
 $LASTEXITCODE
+.\build\debug\time_weighted_spread_tests.exe
+$LASTEXITCODE
 .\build\debug\participant_ledger_tests.exe
 $LASTEXITCODE
 .\build\debug\participant_ledger_allocation_tests.exe
 $LASTEXITCODE
 .\build\debug\participant_pnl_tests.exe
+$LASTEXITCODE
+.\build\debug\participant_fills_tests.exe
 $LASTEXITCODE
 .\build\debug\order_id_source_tests.exe
 $LASTEXITCODE
@@ -568,6 +675,8 @@ $LASTEXITCODE
 .\build\debug\participant_allocation_tests.exe
 $LASTEXITCODE
 .\build\debug\participant_integration_tests.exe
+$LASTEXITCODE
+.\build\debug\market_making_tests.exe
 $LASTEXITCODE
 .\build\debug\simulation_tests.exe
 $LASTEXITCODE
@@ -622,11 +731,15 @@ echo $?
 echo $?
 ./build/debug/market_data_tests
 echo $?
+./build/debug/time_weighted_spread_tests
+echo $?
 ./build/debug/participant_ledger_tests
 echo $?
 ./build/debug/participant_ledger_allocation_tests
 echo $?
 ./build/debug/participant_pnl_tests
+echo $?
+./build/debug/participant_fills_tests
 echo $?
 ./build/debug/order_id_source_tests
 echo $?
@@ -639,6 +752,8 @@ echo $?
 ./build/debug/participant_allocation_tests
 echo $?
 ./build/debug/participant_integration_tests
+echo $?
+./build/debug/market_making_tests
 echo $?
 ./build/debug/simulation_tests
 echo $?
@@ -876,14 +991,14 @@ These generated workloads validate correctness.
 ### GCC checked-container tests
 
 GCC/libstdc++ can also check container and iterator operations at runtime in a
-separate build. These commands build and run twenty-eight tests covering controlled
+separate build. These commands build and run thirty-one tests covering controlled
 participants, accounting,
 exact aggregates, market data, recording, simulation, books and the exchange:
 
 ```powershell
 cmake -S . -B build/checked -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DCMAKE_CXX_FLAGS=-D_GLIBCXX_DEBUG
-cmake --build build/checked --target order_id_source_tests simulation_random_tests scripted_participant_tests participant_plans_tests participant_allocation_tests participant_integration_tests unsigned_product_tests cash_amount_tests participant_ledger_tests participant_ledger_allocation_tests participant_pnl_tests aggregate_quantity_tests event_record_tests market_data_tests simulation_tests simulation_queue_tests simulation_queue_allocation_tests simulation_delivery_tests order_book_tests order_book_allocation_tests order_book_matching_tests order_book_limit_tests order_book_cancel_tests order_book_market_tests order_book_invariant_tests exchange_tests exchange_scenario_tests exchange_property_tests
-ctest --test-dir build/checked --output-on-failure -R "^(order_id_source|simulation_random|scripted_participant|participant_(plans|allocation|integration)|unsigned_product|cash_amount|participant_ledger(_allocation)?|participant_pnl|aggregate_quantity|event_record|market_data|simulation(_queue(_allocation)?|_delivery)?|order_book(_allocation|_matching|_limit|_cancel|_market|_invariant)?|exchange(_scenario|_property)?)$"
+cmake --build build/checked --target order_id_source_tests simulation_random_tests scripted_participant_tests participant_plans_tests participant_allocation_tests participant_integration_tests market_making_tests time_weighted_spread_tests unsigned_product_tests cash_amount_tests participant_ledger_tests participant_ledger_allocation_tests participant_pnl_tests participant_fills_tests aggregate_quantity_tests event_record_tests market_data_tests simulation_tests simulation_queue_tests simulation_queue_allocation_tests simulation_delivery_tests order_book_tests order_book_allocation_tests order_book_matching_tests order_book_limit_tests order_book_cancel_tests order_book_market_tests order_book_invariant_tests exchange_tests exchange_scenario_tests exchange_property_tests
+ctest --test-dir build/checked --output-on-failure -R "^(order_id_source|simulation_random|scripted_participant|participant_(plans|allocation|integration)|unsigned_product|cash_amount|participant_ledger(_allocation)?|participant_pnl|participant_fills|aggregate_quantity|event_record|market_data|time_weighted_spread|market_making|simulation(_queue(_allocation)?|_delivery)?|order_book(_allocation|_matching|_limit|_cancel|_market|_invariant)?|exchange(_scenario|_property)?)$"
 ```
 
 Keep this build separate: the flag changes standard-container layouts, so code

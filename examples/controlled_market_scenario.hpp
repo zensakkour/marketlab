@@ -2,6 +2,7 @@
 
 #include <marketlab/event_record.hpp>
 #include <marketlab/market_data.hpp>
+#include <marketlab/participant_fills.hpp>
 #include <marketlab/participant_plans.hpp>
 #include <marketlab/participant_pnl.hpp>
 #include <marketlab/scripted_participant.hpp>
@@ -23,6 +24,7 @@ struct Result {
     DepthSnapshot market;
     std::array<ParticipantAccount, 3> accounts;
     std::array<PnlBreakdown, 3> pnl;
+    std::array<ParticipantFills, 3> fills;
 };
 
 inline Result run(std::uint64_t seed) {
@@ -47,7 +49,7 @@ inline Result run(std::uint64_t seed) {
             if (!actor->schedule_next(simulation)) throw std::runtime_error{"participant scheduling failed"};
         }
     }
-    Result result{seed, reference, {}, {}, {}, {}};
+    Result result{seed, reference, {}, {}, {}, {}, {}};
     for (;;) {
         const auto step = simulation.step();
         if (!step) throw std::runtime_error{"simulation capacity exhausted"};
@@ -64,12 +66,22 @@ inline Result run(std::uint64_t seed) {
     for (std::size_t index = 0; index < participants.size(); ++index) {
         result.accounts[index] = ledger.account(participants[index]).value();
         result.pnl[index] = fifo_pnl(ledger, participants[index], reference).value();
+        result.fills[index] = participant_fills(ledger, participants[index]).value();
     }
     return result;
 }
 
 inline void write_events(std::ostream& output, const Result& result) {
     for (const auto& event : result.events) write_event_record(output, event);
+}
+
+inline void write_fills(std::ostream& output, const Result& result) {
+    for (std::size_t index = 0; index < result.fills.size(); ++index) {
+        const auto& fills = result.fills[index];
+        output << "participant_id=" << index + 1
+               << " buy_fills=" << fills.buy_count << " sell_fills=" << fills.sell_count
+               << " aggressive_fills=" << fills.aggressive_count << " passive_fills=" << fills.passive_count << '\n';
+    }
 }
 
 inline void write_summary(std::ostream& output, const Result& result) {

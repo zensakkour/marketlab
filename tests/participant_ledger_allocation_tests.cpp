@@ -1,5 +1,6 @@
 #include "participant_ledger_test_support.hpp"
 
+#include <marketlab/participant_fills.hpp>
 #include <marketlab/participant_pnl.hpp>
 #include <marketlab/simulation.hpp>
 
@@ -98,6 +99,9 @@ void test_reads_and_refusals_do_not_allocate() {
     const auto pnl = account->total_pnl(Price::from_ticks(101).value());
     const auto unknown_fifo = fifo_pnl(ledger, {99}, Price::from_ticks(100).value());
     const auto empty_fifo = fifo_pnl(empty_ledger, {1}, Price::from_ticks(100).value());
+    const auto fills = participant_fills(ledger, {1});
+    const auto missing_fills = participant_fills(ledger, {99});
+    const auto empty_fills = participant_fills(empty_ledger, {1});
     const auto history = ledger.history();
     const auto last = ledger.last_event_sequence();
     const auto empty = ledger.apply({});
@@ -108,6 +112,7 @@ void test_reads_and_refusals_do_not_allocate() {
         position == NetPosition{false, {0, 5}} && cash == NetCashFlow{true, {0, 0, 500}} &&
         notional == CashAmount{0, 0, 500} && pnl == TotalPnl{false, {0, 0, 5}} &&
         !unknown_fifo && empty_fifo == PnlBreakdown{} &&
+        fills == ParticipantFills{1, 0, 1, 0} && !missing_fills && empty_fills == ParticipantFills{} &&
         history.size() == 1 && history.data() == borrowed &&
         last.value == 2 && empty && !duplicate && duplicate.error() == AccountingError::OutOfOrder &&
         !refused && refused.error() == AccountingError::UnknownParticipant && ledger.history().size() == 1,

@@ -9,7 +9,8 @@
 
 int main(int argc, char** argv) {
     const bool events = argc >= 2 && std::string_view{argv[1]} == "--events";
-    const int seed_index = events ? 2 : 1;
+    const bool fills = argc >= 2 && std::string_view{argv[1]} == "--fills";
+    const int seed_index = events || fills ? 2 : 1;
     std::uint64_t seed = 42;
     bool valid = argc == seed_index || argc == seed_index + 1;
     if (valid && argc == seed_index + 1) {
@@ -18,12 +19,13 @@ int main(int argc, char** argv) {
         valid = parsed.ec == std::errc{} && parsed.ptr == text.data() + text.size();
     }
     if (!valid) {
-        std::cerr << "usage: controlled_market [--events] [seed]\n";
+        std::cerr << "usage: controlled_market [--events|--fills] [seed]\n";
         return 2;
     }
     try {
         const auto result = controlled_market_example::run(seed);
         if (events) controlled_market_example::write_events(std::cout, result);
+        else if (fills) controlled_market_example::write_fills(std::cout, result);
         else controlled_market_example::write_summary(std::cout, result);
         std::cout.flush();
         return std::cout ? 0 : 1;

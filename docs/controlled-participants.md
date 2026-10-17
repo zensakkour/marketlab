@@ -127,7 +127,9 @@ ask. Each pair uses two fresh IDs, including after fills. Stale cancellations
 follow normal exchange rejection rules. The final pair remains in the exchange;
 there is no implicit final cleanup. For N > 0 refreshes there are 2 + 4(N - 1)
 requests. This is fixed-reference background liquidity; reactive market-making
-and inventory-dependent quoting belong to the next reference experiment.
+and inventory-dependent quoting remain later strategy work. The
+[reference experiment](reference-market-making.md) uses a separate fixed-reference
+market maker alongside background liquidity.
 
 ### Market-order taker
 
@@ -139,7 +141,7 @@ and expires any unfilled remainder under its existing rules.
 
 ## Integrated executable and regression
 
-`controlled_market [--events] [seed]` runs the three plans on instrument 1
+`controlled_market [--events|--fills] [seed]` runs the three plans on instrument 1
 (`CONTROL`, tick size 0.01), with reference and explicit FIFO valuation mark
 100 ticks. Default seed is 42; decimal seeds 0 through UINT64_MAX are accepted.
 
@@ -160,9 +162,11 @@ attempts (including rejections), executions, time, volume, best prices, each
 participant's position/cash/FIFO PnL and final depth. Depth entries are
 `price_ticks:remaining_units:order_count`. Amounts use exact tick-times-quantity
 units; cash is zero-origin flow. `--events` instead writes the existing v1 event
-format, with no summary mixed into it. Exit codes: 0 success, 1 run/output failure,
-2 invalid arguments. A run failure aborts the example; it is not a whole-run
-checkpoint or event replay tool.
+format, with no summary mixed into it. `--fills` instead prints each
+participant's buy/sell/aggressive/passive execution-leg counts; see
+[fill semantics](participant-accounting.md#participant-fill-counts).
+Exit codes: 0 success, 1 run/output failure, 2 invalid arguments.
+A run failure aborts the example; it is not a whole-run checkpoint or event replay tool.
 
 Seed 42 yields 120 requests, 317 events, 45 executions and 91 units traded.
 Positions are +8, +5 and -13; cash flows are -720, -445 and +1165; total PnLs

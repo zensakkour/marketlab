@@ -47,6 +47,37 @@ executions by UINT64_MAX. Each quantity is at most INT64_MAX, so each account's
 gross volume is less than 2^127 and fits the existing two-word aggregate type.
 The sign/magnitude difference is exact at the same boundaries.
 
+## Participant fill counts
+
+`participant_fills(ledger, participant) noexcept` from
+`<marketlab/participant_fills.hpp>` returns an owned optional
+`ParticipantFills`. Unknown participants, including zero, return an empty
+optional; registered participants with no executions have four zero counters.
+
+A **fill** here is one counterparty leg of one execution, regardless of quantity
+or whether the order is fully filled. `buy_count` and `sell_count` count the
+participant's buying/selling legs. `aggressive_count` and `passive_count` count
+its incoming/resting legs. Across all participants each execution contributes
+one buy, one sell, one aggressive and one passive fill. A self-match contributes
+one to all four counters of the same participant, consistently with gross
+accounting, while its net inventory and cash remain unchanged.
+
+A market order hitting two resting orders therefore has two aggressive fills.
+A resting order partially executed three times has three passive fills.
+Acceptance, cancellation, rejection and unfilled expiry add no fill. A single
+execution of INT64_MAX units still adds only one per relevant leg.
+These counts are distinct from `OrderFilled` status events and traded volume.
+
+The projection scans the ledger's committed execution history in O(history)
+time and O(1) extra storage, without allocation, cached mutable counters or state
+changes. Returned values survive later ingestion and source destruction.
+Each individual counter increases at most once per execution, so the ledger's
+strict positive uint64 event ordering bounds it by UINT64_MAX. Directional/role
+counters remain separate; the API does not narrow the sum of two counters.
+
+The controlled-market CLI exposes the counts with
+[`--fills`](../README.md#inspect-controlled-participant-fills).
+
 ## Cash flows and exact notionals
 
 Accounts also store `buy_notional` and `sell_notional` as exact nonnegative

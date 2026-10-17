@@ -26,6 +26,12 @@ std::string summary_text(const Result& result) {
     return output.str();
 }
 
+std::string fills_text(const Result& result) {
+    std::ostringstream output;
+    controlled_market_example::write_fills(output, result);
+    return output.str();
+}
+
 void reconcile(const Result& result) {
     struct Order {
         AcceptedOrder order;
@@ -34,6 +40,7 @@ void reconcile(const Result& result) {
     std::map<OrderId, Order> orders;
     std::set<OrderId> active;
     std::array<std::uint64_t, 3> bought{}, sold{}, spent{}, received{};
+    std::array<std::uint64_t, 3> buy_fills{}, sell_fills{}, aggressive_fills{}, passive_fills{};
     std::uint64_t volume = 0;
     std::uint64_t sequence = 0;
     for (const auto& event : result.events) {
@@ -54,6 +61,7 @@ void reconcile(const Result& result) {
                 const auto units = record.quantity.units();
                 require(active.contains(record.resting_order_id) && incoming.remaining >= units &&
                     resting.remaining >= units && resting.order.limit_price == record.price &&
+                    incoming.order.side == record.aggressive_side && incoming.order.side != resting.order.side &&
                     (incoming.order.side == Side::Buy ? incoming.order.participant_id : resting.order.participant_id) == record.buyer_id &&
                     (incoming.order.side == Side::Sell ? incoming.order.participant_id : resting.order.participant_id) == record.seller_id,
                     "integrated execution disagrees with independent live orders");
@@ -63,6 +71,10 @@ void reconcile(const Result& result) {
                 const auto seller = static_cast<std::size_t>(record.seller_id.value - 1);
                 bought[buyer] += static_cast<std::uint64_t>(units);
                 sold[seller] += static_cast<std::uint64_t>(units);
+                ++buy_fills[buyer];
+                ++sell_fills[seller];
+                ++aggressive_fills[static_cast<std::size_t>(incoming.order.participant_id.value - 1)];
+                ++passive_fills[static_cast<std::size_t>(resting.order.participant_id.value - 1)];
                 const auto notional = static_cast<std::uint64_t>(units * record.price.ticks());
                 spent[buyer] += notional;
                 received[seller] += notional;
@@ -99,6 +111,8 @@ void reconcile(const Result& result) {
     for (std::size_t index = 0; index < result.accounts.size(); ++index) {
         require(result.accounts[index] == ParticipantAccount{{0, bought[index]}, {0, sold[index]},
             {0, 0, spent[index]}, {0, 0, received[index]}}, "integrated account differs from execution reconciliation");
+        require(result.fills[index] == ParticipantFills{buy_fills[index], sell_fills[index],
+            aggressive_fills[index], passive_fills[index]}, "integrated fill counts differ from accepted-order roles");
         const auto expected = static_cast<std::int64_t>(received[index]) - static_cast<std::int64_t>(spent[index]) +
             (static_cast<std::int64_t>(bought[index]) - static_cast<std::int64_t>(sold[index])) * result.mark.ticks();
         net_total += expected;
@@ -142,13 +156,19 @@ int main() {
             "participant_id=3 position_units=-13 cash_tick_units=1165 realised_pnl_tick_units=-121 unrealised_pnl_tick_units=-14 total_pnl_tick_units=-135\n"
             "bids=99:4:2,98:10:2,97:19:7,96:3:1 asks=101:1:1,102:8:1,103:6:5,104:5:3\n";
         require(summary_text(golden) == expected, "controlled-market golden summary changed");
+        require(fills_text(golden) ==
+            "participant_id=1 buy_fills=9 sell_fills=8 aggressive_fills=0 passive_fills=17\n"
+            "participant_id=2 buy_fills=17 sell_fills=14 aggressive_fills=3 passive_fills=28\n"
+            "participant_id=3 buy_fills=19 sell_fills=23 aggressive_fills=42 passive_fills=0\n",
+            "controlled-market golden fills changed");
         for (const auto seed : std::array<std::uint64_t, 4>{0, 42, 123, UINT64_MAX}) {
             const auto first = controlled_market_example::run(seed);
             reconcile(first);
             for (int repeat = 0; repeat < 3; ++repeat) {
                 const auto replay = controlled_market_example::run(seed);
                 require(event_text(first) == event_text(replay) && summary_text(first) == summary_text(replay) &&
-                    first.accounts == replay.accounts && first.pnl == replay.pnl,
+                    first.accounts == replay.accounts && first.pnl == replay.pnl &&
+                    first.fills == replay.fills && fills_text(first) == fills_text(replay),
                     "controlled-market same-seed events or final state differ");
             }
             if (seed != 42) require(event_text(first) != event_text(golden), "different seed did not affect generated flow");
