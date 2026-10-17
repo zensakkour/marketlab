@@ -81,6 +81,16 @@ and any final flush/close; a failed write can leave a partial record. The alread
 committed exchange operation is unchanged. Keep its returned step/events while
 handling output failure; retrying output must not resubmit the arrival.
 
+## Multi-instrument streams
+
+A multi-instrument router owns independent single-instrument exchanges. Its
+merged records use the same v1 fields, with request/event sequences local to
+each instrument. Identify events by (instrument_id, event_seq), preserve caller
+processing order, and do not infer a global clock or sequence from these values.
+Unknown destinations produce routing diagnostics rather than exchange events,
+so a merged event file alone does not record every attempted arrival.
+See [multi-instrument routing](multi-instrument-exchange.md).
+
 ## Scope
 
 The format records complete intrinsic exchange-event fields, not an experiment

@@ -1,9 +1,9 @@
 # Instrument configuration
 
 `InstrumentRegistry` from `<marketlab/instrument_registry.hpp>` owns a fixed
-set of instrument configurations. This is the first Phase 11 component;
-request routing and multiple active books under one engine are still separate
-work. Existing single-instrument exchange/simulation behavior is unchanged.
+set of instrument configurations. The
+[multi-instrument exchange](multi-instrument-exchange.md) copies these
+configurations into independent exchanges under one logical writer.
 
 ## Construction and identity
 
@@ -62,11 +62,10 @@ This registry owns configuration only. It does not own books, registrations of
 participants, order-ID history, clocks, event counters, market snapshots or
 accounting. It does not change any single-instrument rejection convention.
 
-The next Phase 11 lot must define routing/ownership together with the scope of
-time, request/event counters and client-order identities before connecting
-multiple books. Per-instrument accounting and market-data isolation must then be
-validated on the routed engine. The Phase 11 multi-instrument validation gate
-remains open.
+The routed owner keeps clocks, request/event counters and accepted client IDs
+local to each instrument. It exposes read-only exchanges for existing market-data
+projections; downstream ledgers remain separate per instrument. The configuration
+registry itself still owns none of that mutable state.
 
 The `instrument_registry` test checks retained owned configurations, all input
 permutations, read-only stable views, minimum/maximum IDs, exact tick parameters,

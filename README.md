@@ -46,8 +46,11 @@ reports. See
 [participant accounting](docs/participant-accounting.md) and
 [controlled participants](docs/controlled-participants.md) for the current scope.
 The [reference experiment](docs/reference-market-making.md) is a reproducible
-demo and regression fixture. Phase 11 starts with an immutable
-[instrument registry](docs/instrument-configuration.md); multi-book routing is next.
+demo and regression fixture. Phase 11 adds an immutable
+[instrument registry](docs/instrument-configuration.md) and
+[single-writer multi-instrument routing](docs/multi-instrument-exchange.md),
+with independent books, clocks, counters, market data and accounting.
+Worker ownership across threads is the next roadmap phase.
 
 ## Build, run, and test
 
@@ -70,9 +73,17 @@ instrument configuration requires a nonzero ID and a nonempty symbol.
 `InstrumentRegistry` owns a fixed copied instrument list. It rejects invalid
 records and duplicate IDs, provides non-allocating lookup with `find(id)` and
 a read-only `instruments()` span in increasing ID order. Borrowed records remain
-valid until destruction. The registry contains configuration; books, routing,
-clock/sequence scope and per-instrument accounting remain the next Phase 11 work.
+valid until destruction. The registry contains immutable configuration.
 See [instrument configuration](docs/instrument-configuration.md).
+
+`MultiInstrumentExchange(registry, participants)` owns one existing `Exchange`
+per instrument and routes raw orders/cancels by ID. Instrument clocks, sequences
+and lifetime client IDs remain local; unknown destinations return
+`UnknownInstrument` without an event or mutation. `find(id)` borrows a const
+exchange for existing market-data projections. `Exchange::instrument()` borrows
+its immutable symbol/tick configuration without allocation. Caller-owned ledgers
+remain separate per instrument; the existing `Simulation` remains mono-instrument.
+See [multi-instrument routing](docs/multi-instrument-exchange.md).
 
 For v0, a participant is represented by its `ParticipantId`. Orders and executions
 carry that identity directly. Participant registration belongs to fixed
@@ -372,9 +383,10 @@ build files; building compiles the test executables; CTest runs them. Tests are
 enabled explicitly, and compiler warnings are treated as errors.
 
 A successful test run ends with `100% tests passed, 0 tests failed`.
-Currently there are thirty-seven registered tests: `price`, `aggregate_quantity`,
+Currently there are thirty-nine registered tests: `price`, `aggregate_quantity`,
 `unsigned_product`, `cash_amount`,
-`domain`, `instrument_registry`, `requests`, `orders`,
+`domain`, `instrument_registry`, `multi_instrument`,
+`multi_instrument_allocation`, `requests`, `orders`,
 `events`, `event_record`, `market_data`, `time_weighted_spread`, `participant_ledger`,
 `participant_ledger_allocation`, `participant_pnl`, `participant_fills`, `order_id_source`,
 `simulation_random`, `scripted_participant`, `participant_plans`,
@@ -390,6 +402,13 @@ nonzero exit code on failure.
 `instrument_registry` checks copied ownership, sorted lookup/views, boundary
 IDs/tick sizes, duplicate/invalid definitions, constructor allocation failure
 and retry, and allocation-free reads.
+
+`multi_instrument` compares every routed request against isolated exchanges,
+checks instrument-local time/IDs/counters, unknown routing and ledger isolation,
+and repeats the literal two-instrument CLI result and event checksum twenty times.
+`multi_instrument_allocation` injects every construction/processing allocation
+failure, verifies unchanged target/foreign state and retries identically; lookup
+and unknown routing also run with allocation disabled.
 
 `aggregate_quantity` checks exact 128-bit decimal boundaries, checked overflow,
 constexpr operations and 10,000 generated additions against independent decimal
@@ -632,8 +651,51 @@ cmake --build build/reference-only --target market_making
 ```
 
 On Unix, run `./build/reference-only/market_making 42`.
-Both examples remain available with `BUILD_TESTING=OFF`.
+All three examples remain available with `BUILD_TESTING=OFF`.
 The reference is a correctness regression and future benchmark fixture.
+
+### Run the multi-instrument scenario
+
+`multi_instrument` drives ALPHA and BETA through the new single-writer router.
+They share participant IDs and reuse client-order IDs while retaining independent
+books, clocks, event counters, market data and accounts.
+
+```powershell
+cmake --build build/debug --target multi_instrument
+.\build\debug\multi_instrument.exe
+$LASTEXITCODE
+.\build\debug\multi_instrument.exe --events | Set-Content -Encoding ascii -ErrorAction Stop .\build\debug\multi-instrument-events.log
+$LASTEXITCODE
+```
+
+In a Unix shell:
+
+```sh
+./build/debug/multi_instrument
+./build/debug/multi_instrument --events > build/debug/multi-instrument-events.log
+```
+
+The first summary line is `arrivals=12 routing_errors=1 events=25`.
+ALPHA ends at 6 ns with 3 units traded; BETA ends at 5 ns with 7 units traded.
+Both books are empty. At the explicit marks 101/201 ticks, the buyer's total
+PnL is +3/+7 in the respective instrument's tick-times-quantity units.
+ALPHA's tick is 0.01 and BETA's is 0.5; their raw tick notionals are kept separate.
+
+The example has no seed argument. Exit codes are 0 success, 1 run/output failure
+and 2 invalid arguments. `--events` prints 25 existing v1 records with
+instrument-local sequences. One unknown destination produces a counted routing
+diagnostic and no exchange record.
+See [routing, identity and accounting scope](docs/multi-instrument-exchange.md).
+
+For a clean standalone build without tests:
+
+```powershell
+cmake -S . -B build/multi-only -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+cmake --build build/multi-only --target multi_instrument
+.\build\multi-only\multi_instrument.exe
+```
+
+On Unix, run `./build/multi-only/multi_instrument`.
 
 ### Run an executable directly
 
@@ -657,6 +719,10 @@ $LASTEXITCODE
 .\build\debug\domain_tests.exe
 $LASTEXITCODE
 .\build\debug\instrument_registry_tests.exe
+$LASTEXITCODE
+.\build\debug\multi_instrument_tests.exe
+$LASTEXITCODE
+.\build\debug\multi_instrument_allocation_tests.exe
 $LASTEXITCODE
 .\build\debug\requests_tests.exe
 $LASTEXITCODE
@@ -736,6 +802,10 @@ echo $?
 ./build/debug/domain_tests
 echo $?
 ./build/debug/instrument_registry_tests
+echo $?
+./build/debug/multi_instrument_tests
+echo $?
+./build/debug/multi_instrument_allocation_tests
 echo $?
 ./build/debug/requests_tests
 echo $?
@@ -1007,14 +1077,14 @@ These generated workloads validate correctness.
 ### GCC checked-container tests
 
 GCC/libstdc++ can also check container and iterator operations at runtime in a
-separate build. These commands build and run thirty-two tests covering controlled
+separate build. These commands build and run thirty-four tests covering controlled
 participants, accounting,
 exact aggregates, market data, recording, simulation, books and the exchange:
 
 ```powershell
 cmake -S . -B build/checked -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DCMAKE_CXX_FLAGS=-D_GLIBCXX_DEBUG
-cmake --build build/checked --target instrument_registry_tests order_id_source_tests simulation_random_tests scripted_participant_tests participant_plans_tests participant_allocation_tests participant_integration_tests market_making_tests time_weighted_spread_tests unsigned_product_tests cash_amount_tests participant_ledger_tests participant_ledger_allocation_tests participant_pnl_tests participant_fills_tests aggregate_quantity_tests event_record_tests market_data_tests simulation_tests simulation_queue_tests simulation_queue_allocation_tests simulation_delivery_tests order_book_tests order_book_allocation_tests order_book_matching_tests order_book_limit_tests order_book_cancel_tests order_book_market_tests order_book_invariant_tests exchange_tests exchange_scenario_tests exchange_property_tests
-ctest --test-dir build/checked --output-on-failure -R "^(instrument_registry|order_id_source|simulation_random|scripted_participant|participant_(plans|allocation|integration)|unsigned_product|cash_amount|participant_ledger(_allocation)?|participant_pnl|participant_fills|aggregate_quantity|event_record|market_data|time_weighted_spread|market_making|simulation(_queue(_allocation)?|_delivery)?|order_book(_allocation|_matching|_limit|_cancel|_market|_invariant)?|exchange(_scenario|_property)?)$"
+cmake --build build/checked --target instrument_registry_tests multi_instrument_tests multi_instrument_allocation_tests order_id_source_tests simulation_random_tests scripted_participant_tests participant_plans_tests participant_allocation_tests participant_integration_tests market_making_tests time_weighted_spread_tests unsigned_product_tests cash_amount_tests participant_ledger_tests participant_ledger_allocation_tests participant_pnl_tests participant_fills_tests aggregate_quantity_tests event_record_tests market_data_tests simulation_tests simulation_queue_tests simulation_queue_allocation_tests simulation_delivery_tests order_book_tests order_book_allocation_tests order_book_matching_tests order_book_limit_tests order_book_cancel_tests order_book_market_tests order_book_invariant_tests exchange_tests exchange_scenario_tests exchange_property_tests
+ctest --test-dir build/checked --output-on-failure -R "^(instrument_registry|multi_instrument(_allocation)?|order_id_source|simulation_random|scripted_participant|participant_(plans|allocation|integration)|unsigned_product|cash_amount|participant_ledger(_allocation)?|participant_pnl|participant_fills|aggregate_quantity|event_record|market_data|time_weighted_spread|market_making|simulation(_queue(_allocation)?|_delivery)?|order_book(_allocation|_matching|_limit|_cancel|_market|_invariant)?|exchange(_scenario|_property)?)$"
 ```
 
 Keep this build separate: the flag changes standard-container layouts, so code

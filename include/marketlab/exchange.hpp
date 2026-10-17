@@ -55,6 +55,9 @@ public:
         }
     }
 
+    // Immutable owned configuration; the borrowed reference lasts until destruction.
+    [[nodiscard]] const Instrument& instrument() const noexcept { return instrument_; }
+
     [[nodiscard]] const OrderBook& book() const noexcept {
         return book_;
     }
