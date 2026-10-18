@@ -4,17 +4,22 @@
 #include <marketlab/market_data.hpp>
 #include <marketlab/participant_pnl.hpp>
 #include <marketlab/partitioned_simulation.hpp>
+#include <marketlab/threaded_simulation.hpp>
 
 #include <array>
 #include <cstddef>
+#include <exception>
 #include <map>
 #include <ostream>
 #include <stdexcept>
+#include <type_traits>
 #include <vector>
 
 namespace partitioned_example {
 
 using namespace marketlab;
+
+enum class ExecutionMode { CallerDriven, Threaded };
 
 struct InstrumentReport {
     Instrument instrument;
@@ -25,6 +30,7 @@ struct InstrumentReport {
 };
 
 struct Result {
+    ExecutionMode mode{ExecutionMode::CallerDriven};
     std::size_t attempts{};
     std::size_t scheduled{};
     std::size_t refused{};
@@ -33,7 +39,8 @@ struct Result {
     std::vector<InstrumentReport> instruments;
 };
 
-inline Result run(std::size_t workers) {
+template<class Runner>
+inline Result run_scenario(std::size_t workers) {
     if (workers == 0 || workers > 4) throw std::invalid_argument{"example requires 1 through 4 workers"};
     const std::array configs{
         Instrument{{1}, "ALPHA", TickSize::from_decimal(1, 2).value()},
@@ -44,7 +51,7 @@ inline Result run(std::size_t workers) {
     std::vector<InstrumentWorkerAssignment> assignments;
     for (const auto& config : configs) assignments.push_back({config.id, (config.id.value - 1) % workers});
     WorkerAssignmentPlan plan{registry, workers, assignments};
-    PartitionedSimulation runner{registry, plan, participants};
+    Runner runner{registry, plan, participants};
     std::map<InstrumentId, ParticipantLedger> ledgers;
     for (const auto& config : configs) ledgers.try_emplace(config.id, config.id, participants);
     const std::array<SimulationRequest, 12> script{
@@ -61,6 +68,7 @@ inline Result run(std::size_t workers) {
         OrderRequest{{4}, {2}, {2}, {3}, Side::Buy, OrderType::Limit, 0, 200},
         CancelRequest{{0}, {99}, {1}, {1}}};
     Result result;
+    if constexpr (std::is_same_v<Runner, ThreadedSimulation>) result.mode = ExecutionMode::Threaded;
     result.worker_steps.resize(workers);
     for (const auto& request : script) {
         ++result.attempts;
@@ -69,22 +77,38 @@ inline Result run(std::size_t workers) {
         else if (scheduled.error() == PartitionedScheduleError::UnknownInstrument) ++result.refused;
         else throw std::runtime_error{"partitioned example scheduling failed"};
     }
-    std::size_t processed = 0;
-    while (processed < result.scheduled) {
-        for (std::size_t worker = 0; worker < workers; ++worker) {
-            const auto step = runner.step(worker);
-            if (!step) throw std::runtime_error{"partitioned example engine failed"};
-            if (!*step) continue;
-            ++processed;
-            ++result.worker_steps[worker];
-            for (const auto& event : (**step).events) {
-                if (const auto* execution = std::get_if<Execution>(&event)) {
-                    if (!ledgers.at(execution->instrument_id).apply(std::span{execution, 1})) {
-                        throw std::logic_error{"partitioned example accounting refused"};
-                    }
+    const auto consume = [&](const WorkerStep& step) {
+        ++result.worker_steps[step.worker_index];
+        for (const auto& event : step.events) {
+            if (const auto* execution = std::get_if<Execution>(&event)) {
+                if (!ledgers.at(execution->instrument_id).apply(std::span{execution, 1})) {
+                    throw std::logic_error{"partitioned example accounting refused"};
                 }
             }
-            result.events.insert(result.events.end(), (**step).events.begin(), (**step).events.end());
+        }
+        result.events.insert(result.events.end(), step.events.begin(), step.events.end());
+    };
+    if constexpr (std::is_same_v<Runner, ThreadedSimulation>) {
+        const auto batches = runner.run();
+        // This finite example reports only a complete successful experiment.
+        // Library callers needing recovery retain all batches, including failed prefixes.
+        for (const auto& batch : batches) {
+            if (batch.exception) std::rethrow_exception(batch.exception);
+            if (batch.error) throw std::runtime_error{"partitioned example engine failed"};
+        }
+        for (const auto& batch : batches) {
+            for (const auto& step : batch.steps) consume(step);
+        }
+    } else {
+        std::size_t processed = 0;
+        while (processed < result.scheduled) {
+            for (std::size_t worker = 0; worker < workers; ++worker) {
+                const auto step = runner.step(worker);
+                if (!step) throw std::runtime_error{"partitioned example engine failed"};
+                if (!*step) continue;
+                ++processed;
+                consume(**step);
+            }
         }
     }
     for (const auto& config : configs) {
@@ -102,11 +126,20 @@ inline Result run(std::size_t workers) {
     return result;
 }
 
+inline Result run(std::size_t workers, ExecutionMode mode = ExecutionMode::CallerDriven) {
+    switch (mode) {
+    case ExecutionMode::CallerDriven: return run_scenario<PartitionedSimulation>(workers);
+    case ExecutionMode::Threaded: return run_scenario<ThreadedSimulation>(workers);
+    }
+    throw std::invalid_argument{"unknown example execution mode"};
+}
+
 inline void write_events(std::ostream& output, const Result& result) {
     for (const auto& event : result.events) write_event_record(output, event);
 }
 
 inline void write_summary(std::ostream& output, const Result& result) {
+    if (result.mode == ExecutionMode::Threaded) output << "execution=threaded ";
     output << "workers=" << result.worker_steps.size() << " attempts=" << result.attempts
            << " scheduled=" << result.scheduled << " refused=" << result.refused << " events=" << result.events.size() << '\n';
     for (std::size_t index = 0; index < result.worker_steps.size(); ++index) {

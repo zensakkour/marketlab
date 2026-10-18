@@ -46,5 +46,6 @@ if(BUILD_TESTING)
         endif()
         add_test(NAME ${test_name} COMMAND ${test_name}_tests)
     endforeach()
-    set_tests_properties(threaded_simulation threaded_simulation_allocation PROPERTIES TIMEOUT 120)
+    set_tests_properties(threaded_simulation threaded_simulation_allocation partitioned_market
+                         PROPERTIES TIMEOUT 120)
 endif()

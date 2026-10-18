@@ -2,6 +2,7 @@
 
 #include <marketlab/partitioned_simulation.hpp>
 
+#include <atomic>
 #include <cstddef>
 #include <exception>
 #include <latch>
@@ -82,7 +83,9 @@ public:
         if (results.empty()) return results;
 
         std::latch start{1};
-        bool proceed = false; // Published to all threads by the start latch, never changed afterward.
+        // Explicit release/acquire publication also makes the startup decision
+        // visible to race detectors independently of latch instrumentation.
+        std::atomic<bool> proceed{false};
         {
             std::vector<std::jthread> threads;
             threads.reserve(results.size());
@@ -92,7 +95,7 @@ public:
                     threads.emplace_back([&start, &proceed, worker, output = &result]() noexcept {
                         try {
                             start.wait();
-                            if (!proceed) return;
+                            if (!proceed.load(std::memory_order_acquire)) return;
                             while (!worker->queue.empty()) {
                                 auto step = worker->step(output->worker_index);
                                 if (!step) {
@@ -113,7 +116,7 @@ public:
                 start.count_down();
                 throw;
             }
-            proceed = true;
+            proceed.store(true, std::memory_order_release);
             start.count_down();
         } // jthread destruction joins every writer before results or views become observable.
         return results;

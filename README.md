@@ -55,8 +55,9 @@ Phase 12 begins with a validated, immutable
 [caller-driven partitioned simulation](docs/partitioned-simulation.md), with
 private queues, routed processing and owned step results.
 [Threaded closed batches](docs/threaded-simulation.md) now process independent
-partitions concurrently with joined, deterministic publication. Live ingress,
-backpressure and race-detector validation remain open.
+partitions concurrently with joined, deterministic publication. Closed-batch
+concurrency tests also pass under Linux ThreadSanitizer. Live ingress and
+backpressure remain open.
 
 ## Build, run, and test
 
@@ -455,13 +456,17 @@ instrument's event stream, book, market data, cash, positions and FIFO PnL.
 `partitioned_simulation_allocation` verifies failed construction, scheduling and
 processing retain their inputs/pending arrivals and retry identically.
 `partitioned_market` locks the three-instrument example's literal reports and
-event checksums over repeated runs with 1 through 4 logical workers.
+event checksums over repeated runs with 1 through 4 workers in both caller-driven
+and actual-thread modes.
 
 `threaded_simulation` compares two consecutive batches against sequential
-partitions and replays the reference experiment on actual threads.
+partitions and replays the reference experiment on actual threads. A further
+16,640 arrivals exercise large equal-time backlogs, uneven partition loads, idle
+workers, FIFO fills and result ownership across consecutive runs.
 `threaded_simulation_allocation` injects coordinator and worker failures to check
 the startup gate, preserved committed prefixes, pending-head retry and independent
-worker completion. These tests do not replace race detection.
+worker completion. The dedicated Linux ThreadSanitizer command below runs these
+two suites and the actual-thread CLI regression with race instrumentation.
 
 `aggregate_quantity` checks exact 128-bit decimal boundaries, checked overflow,
 constexpr operations and 10,000 generated additions against independent decimal
@@ -754,7 +759,8 @@ On Unix, run `./build/multi-only/multi_instrument`.
 
 `partitioned_market` schedules ALPHA, BETA and GAMMA into private worker queues.
 The default is two logical workers; choose 1 through 4 to compare partitions.
-This runner is caller-driven: all calls are sequential and it launches no threads.
+By default the runner is caller-driven. Add `--threaded` to execute the same
+closed input batch with one thread per nonempty partition, joined before reports.
 
 ```powershell
 cmake --build build/debug --target partitioned_market
@@ -782,9 +788,36 @@ counts are 4, 4, 3 and 0. The three instruments trade 3, 5 and 3 units respectiv
 and finish with empty books. Reports include each instrument's clock, counters,
 positions, cash and total PnL at explicit marks 101/201/301 ticks.
 
+Run the same scenario on actual threads:
+
+```powershell
+.\build\debug\partitioned_market.exe 2 --threaded
+$LASTEXITCODE
+.\build\debug\partitioned_market.exe 4 --threaded
+$LASTEXITCODE
+.\build\debug\partitioned_market.exe 2 --threaded --events | Set-Content -Encoding ascii -ErrorAction Stop .\build\debug\threaded-events.log
+$LASTEXITCODE
+```
+
+In a Unix shell:
+
+```sh
+./build/debug/partitioned_market 2 --threaded
+./build/debug/partitioned_market 2 --threaded --events > build/debug/threaded-events.log
+```
+
+The threaded summary starts with
+`execution=threaded workers=2 attempts=12 scheduled=11 refused=1 events=25`.
+The flags may appear in either order after the worker count; duplicates and
+unknown flags return 2. Four configured workers use three threads for this script,
+with the fourth worker idle. This example reports only a complete successful run;
+a worker failure exits 1. The library's recoverable partial batches are documented
+in [threaded simulation](docs/threaded-simulation.md).
+
 Each instrument has identical events and final results for every supported
 partition count. The combined event order follows ascending round-robin worker
-steps and may differ between partition counts. Exit codes are 0 success,
+steps in the default mode; threaded output is grouped by worker index, independent
+of completion order. Both can differ between partition counts. Exit codes are 0 success,
 1 run/output failure and 2 invalid arguments. See
 [ownership, ordering and expected results](docs/partitioned-simulation.md).
 
@@ -807,8 +840,9 @@ cmake --build build/debug --target threaded_simulation_tests threaded_simulation
 ctest --test-dir build/debug --output-on-failure -R "^threaded_simulation(_allocation)?$"
 ```
 
-Both tests are silent on success when run directly. The existing example CLIs
-remain caller-driven. See [threaded configuration, publication and recovery](docs/threaded-simulation.md)
+Both tests are silent on success when run directly. Use `partitioned_market 2
+--threaded` for the actual-thread example; its default mode remains caller-driven.
+See [threaded configuration, publication and recovery](docs/threaded-simulation.md)
 for the actual-thread API and its boundaries.
 
 ### Run an executable directly
@@ -1232,5 +1266,40 @@ ctest --test-dir build/checked --output-on-failure -R "^(instrument_registry|wor
 Keep this build separate: the flag changes standard-container layouts, so code
 sharing containers must use the same mode. See the
 [libstdc++ debug-mode documentation](https://gcc.gnu.org/onlinedocs/libstdc++/manual/debug_mode_using.html).
+
+### Linux ThreadSanitizer tests
+
+Run the concurrency suites under ThreadSanitizer on Linux or Linux within WSL.
+The current MinGW compiler does not provide its runtime. A Linux compiler with
+C++23, pthreads and ThreadSanitizer is required; GCC 16.2 was validated under WSL.
+No Linux CMake or Ninja installation is needed for this focused check.
+
+From the repository root in a Linux shell:
+
+```sh
+sh scripts/test-thread-sanitizer.sh
+```
+
+From PowerShell at the repository root, with a configured WSL distribution:
+
+```powershell
+wsl --exec sh scripts/test-thread-sanitizer.sh
+$LASTEXITCODE
+```
+
+The script compiles and runs `threaded_simulation_tests`,
+`threaded_simulation_allocation_tests` and `partitioned_market_tests` with
+`-O1 -g -fsanitize=thread -fno-omit-frame-pointer -pthread`, treating compiler
+warnings as errors. `CXX` can select another compatible compiler executable.
+Binaries stay under ignored `build/tsan`; the script works when invoked by an
+absolute path from another directory. Git keeps this script's line endings LF.
+
+A compile/test error stops the script immediately. Each test runs with
+`TSAN_OPTIONS=halt_on_error=1:exitcode=66`; no race suppressions are configured.
+Exit 0 means all three suites passed without a sanitizer report; unsupported
+non-Linux shells return 2. Missing compiler/runtime errors remain visible.
+These checks exercise the closed-batch API, failure recovery and threaded CLI;
+live ingress is outside their scope. See the
+[GCC instrumentation options](https://gcc.gnu.org/onlinedocs/gcc/Instrumentation-Options.html).
 
 MarketLab is simulation infrastructure and does not place real trades.

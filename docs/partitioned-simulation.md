@@ -88,7 +88,8 @@ Empty steps do not advance time. After drain, scheduling current/future arrivals
 can resume processing with existing IDs and sequences. Construction and scope
 lifetime manage this caller-driven owner. The separate threaded batch owner
 provides common-gate startup and join-before-publication; live close/drain
-channels, backpressure and race detection remain later Phase 12 work.
+channels and backpressure remain later Phase 12 work. The closed-batch runner
+also has Linux ThreadSanitizer validation; see its documentation for scope.
 
 Returned results own their events after subsequent steps or owner destruction.
 Accounting and recording remain downstream caller responsibilities. A downstream
@@ -98,10 +99,14 @@ is no whole-experiment rollback guarantee.
 
 ## Example and validation
 
-`partitioned_market [worker-count:1..4 [--events]]` defaults to two workers.
-It schedules a fixed three-instrument script, counts one unknown destination,
-then advances workers in ascending round-robin order. The count is the number
-of logical partitions. No worker threads are launched. The fourth worker is idle.
+`partitioned_market [worker-count:1..4 [--threaded] [--events]]` defaults to two
+caller-driven workers. It schedules a fixed three-instrument script, counts one
+unknown destination, then advances workers in ascending round-robin order.
+With `--threaded`, the same scenario runs through `ThreadedSimulation` and
+publishes joined batches by worker index. No threads are launched in the default
+mode. Only nonempty partitions launch threads in threaded mode; the fourth worker
+is idle in either case. Flags may appear in either order after the worker count;
+duplicate or unknown flags are refused.
 Exit codes are 0 for success, 1 for run/output failure and 2 for invalid arguments.
 
 | Result | ALPHA | BETA | GAMMA |
@@ -118,8 +123,21 @@ There are 12 scheduling attempts, 11 queued arrivals, 1 refused destination and
 25 events; all books finish empty. Cash/PnL remain exact in each instrument's own
 tick-times-quantity units, with no cross-instrument portfolio sum.
 
-LF-normalized v1 event FNV-1a-64 checksums are `c18fc1aae8162e95` (one worker),
-`be71fb86b4a9b923` (two), and `dc9eabc282adc655` (three or four).
+Threaded summary output adds `execution=threaded` before the existing fields;
+market/account lines remain identical. Event output contains only v1 records.
+LF-normalized v1 event FNV-1a-64 checksums reflect the two publication conventions:
+
+| Workers | Caller-driven round-robin | Threaded worker-index batches |
+|---|---|---|
+| 1 | `c18fc1aae8162e95` | `c18fc1aae8162e95` |
+| 2 | `be71fb86b4a9b923` | `ae1a327fb209f545` |
+| 3 or 4 | `dc9eabc282adc655` | `8a9feb10d6d8e7f5` |
+
+Tests retain the literal caller-driven report/checksums, compare both modes over
+ten fresh runs per partition count, and independently derive threaded export by
+stably grouping the caller-driven events by worker. Every instrument retains its
+ordered events and accounts. The finite CLI aborts with exit code1 if a worker
+fails; recoverable library callers instead retain the full `WorkerBatch` results.
 [README commands](../README.md#run-the-partitioned-scenario) cover builds, runs,
 exports and tests. Tests compare complete per-instrument events, bounded-fixture
 book/market state, quantity/cash accounts and FIFO PnL with isolated exchanges;

@@ -140,6 +140,87 @@ void test_source_lifetime_and_sparse_configuration() {
     require(refused, "mismatched registry and plan accepted");
 }
 
+void test_large_uneven_batches() {
+    const auto configs = workload_instruments(3);
+    InstrumentRegistry registry{configs};
+    const std::array bindings{InstrumentWorkerAssignment{{1}, 0},
+        InstrumentWorkerAssignment{{2}, 1}, InstrumentWorkerAssignment{{3}, 2}};
+    WorkerAssignmentPlan plan{registry, 4, bindings};
+    ThreadedSimulation runner{registry, plan, participants};
+    constexpr std::array<std::uint64_t, 2> sizes{4096, 64};
+    constexpr std::array<std::uint64_t, 2> instruments{1, 3};
+    std::map<InstrumentId, Exchange> references;
+    for (const auto id : instruments) references.try_emplace(InstrumentId{id}, *registry.find({id}), participants);
+    std::vector<WorkerBatch> retained;
+    std::array<std::string, 2> retained_records;
+    for (std::uint64_t epoch = 0; epoch < 2; ++epoch) {
+        const auto time = 10 * (epoch + 1);
+        // Schedule the small partition first; publication still starts at worker zero.
+        for (std::size_t partition = sizes.size(); partition-- > 0;) {
+            const auto count = sizes[partition], id = instruments[partition];
+            const auto base = epoch * 2 * count;
+            // Descending client IDs distinguish FIFO from accidental ID ordering.
+            for (std::uint64_t index = 0; index < count; ++index) {
+                const auto scheduled = runner.schedule(order(id, base + count - index, 1, Side::Buy, 100, 1, time));
+                require(scheduled && scheduled->value == base + index + 1, "large backlog lost an insertion sequence");
+            }
+            for (std::uint64_t index = 0; index < count; ++index) {
+                const auto scheduled = runner.schedule(order(id, base + count + index + 1, 2, Side::Sell, 100, 1, time));
+                require(scheduled && scheduled->value == base + count + index + 1,
+                    "large backlog changed local sequence continuity");
+            }
+            require(runner.queue(partition * 2)->size() == 2 * count,
+                "closed backlog lost pending arrivals before run");
+        }
+        auto batches = runner.run();
+        require(batches.size() == 2 && runner.queue(1)->empty() && !runner.queue(3),
+            "idle partitions appeared in large-batch publication");
+        for (std::size_t partition = 0; partition < sizes.size(); ++partition) {
+            const auto count = sizes[partition], id = instruments[partition];
+            const auto& batch = batches[partition];
+            require(batch.succeeded() && batch.worker_index == partition * 2 && batch.steps.size() == 2 * count,
+                "uneven worker batch failed, lost steps or changed publication order");
+            auto& replay = references.at({id});
+            std::string records;
+            for (std::size_t index = 0; index < batch.steps.size(); ++index) {
+                const auto& step = batch.steps[index];
+                const auto* request = std::get_if<OrderRequest>(&step.arrival.request);
+                const auto base = epoch * 2 * count;
+                const auto expected_id = base + (index < count ? count - index : index + 1);
+                require(request && request->order_id == OrderId{expected_id} &&
+                    step.worker_index == batch.worker_index && step.arrival.sequence.value == base + index + 1 &&
+                    scheduled_time(step.arrival) == LogicalTime{time}, "equal-time backlog changed FIFO delivery");
+                const auto executions = executions_in(step.events);
+                require(executions.size() == (index < count ? 0U : 1U), "large batch lost or duplicated a fill");
+                if (!executions.empty()) {
+                    require(executions[0].resting_order_id == OrderId{base + 2 * count - index} &&
+                        executions[0].aggressive_order_id == OrderId{expected_id} &&
+                        executions[0].buyer_id == ParticipantId{1} && executions[0].seller_id == ParticipantId{2} &&
+                        executions[0].price.ticks() == 100 && executions[0].quantity.units() == 1,
+                        "large price level violated FIFO or execution terms");
+                }
+                const auto expected = isolated_process(replay, step.arrival.request);
+                require(expected && event_text(*expected) == event_text(step.events), "large batch differs from isolated exchange");
+                if (epoch == 0) records += event_text(step.events);
+            }
+            const auto* exchange = runner.find({id});
+            require(exchange->book().empty() && exchange->book().check_invariants() &&
+                exchange->last_request_sequence().value == (epoch + 1) * 2 * count &&
+                to_string(exchange->cumulative_volume()) == std::to_string((epoch + 1) * count) &&
+                runner.queue(batch.worker_index)->empty(), "large batch final state or drain count differs");
+            if (epoch == 0) retained_records[partition] = std::move(records);
+        }
+        require(runner.find({2})->last_request_sequence().value == 0 && runner.run().empty(),
+            "large batch touched an idle instrument or replayed committed arrivals");
+        if (epoch == 0) retained = std::move(batches);
+    }
+    for (std::size_t partition = 0; partition < retained.size(); ++partition) {
+        std::string records;
+        for (const auto& step : retained[partition].steps) records += event_text(step.events);
+        require(records == retained_records[partition], "later run changed previously owned batch results");
+    }
+}
+
 void test_reference_experiment() {
     constexpr std::array owners{ParticipantId{1}, ParticipantId{2}, ParticipantId{3}, ParticipantId{4}};
     for (const auto seed : {0ULL, 42ULL}) {
@@ -200,6 +281,7 @@ int main() {
                 for (const auto workers : {1U, 4U, 7U}) compare_workload(seed, symbols, workers);
             }
         }
+        test_large_uneven_batches();
         test_reference_experiment();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

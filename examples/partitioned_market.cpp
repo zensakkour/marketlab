@@ -8,19 +8,27 @@
 
 int main(int argc, char** argv) {
     std::size_t workers = 2;
-    bool valid = argc >= 1 && argc <= 3;
+    bool valid = argc >= 1 && argc <= 4;
     if (valid && argc >= 2) {
         const std::string_view text{argv[1]};
         const auto parsed = std::from_chars(text.data(), text.data() + text.size(), workers);
         valid = parsed.ec == std::errc{} && parsed.ptr == text.data() + text.size() && workers >= 1 && workers <= 4;
     }
-    const bool events = argc == 3 && std::string_view{argv[2]} == "--events";
-    if (!valid || (argc == 3 && !events)) {
-        std::cerr << "usage: partitioned_market [worker-count:1..4 [--events]]\n";
+    bool events = false, threaded = false;
+    for (int index = 2; valid && index < argc; ++index) {
+        const std::string_view option{argv[index]};
+        if (option == "--events" && !events) events = true;
+        else if (option == "--threaded" && !threaded) threaded = true;
+        else valid = false;
+    }
+    if (!valid) {
+        std::cerr << "usage: partitioned_market [worker-count:1..4 [--threaded] [--events]]\n";
         return 2;
     }
     try {
-        const auto result = partitioned_example::run(workers);
+        const auto mode = threaded ? partitioned_example::ExecutionMode::Threaded :
+                                     partitioned_example::ExecutionMode::CallerDriven;
+        const auto result = partitioned_example::run(workers, mode);
         if (events) partitioned_example::write_events(std::cout, result);
         else partitioned_example::write_summary(std::cout, result);
         std::cout.flush();

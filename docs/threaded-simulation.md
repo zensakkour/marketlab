@@ -87,8 +87,14 @@ only; modeled time always comes from request timestamps.
 ## Build and validation
 
 CMake links `Threads::Threads` through the `marketlab` interface target.
-The existing example CLIs remain caller-driven; exercise the threaded component
-through its dedicated tests:
+The existing `partitioned_market` CLI now accepts `--threaded`; its default stays
+caller-driven. Build and compare both modes with the
+[README commands](../README.md#run-the-partitioned-scenario). Threaded reports
+add `execution=threaded`; event export contains only v1 records, grouped by worker
+index. The finite example exits1 if any worker fails and publishes no partial
+summary; the library recovery contract above remains available to callers.
+
+The threaded component also has dedicated tests:
 
 ```powershell
 cmake -S . -B build/debug -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON
@@ -103,12 +109,26 @@ positions/cash and FIFO PnL against the caller-driven runner. Additional tests
 replay the phase-10 reference experiment beside another instrument with one or
 two actual worker threads, checking its events, depth, spread, fills and accounts.
 
+A separate backlog regression schedules 4,096 bids and matching sells on one
+partition and 64 pairs on another, repeated in two batches (16,640 arrivals).
+All arrivals in each batch have the same timestamp; descending bid IDs make
+FIFO priority observable independently of ID order. Each step is compared with
+an isolated exchange. It checks worker-index publication, exact fill terms,
+sequence continuity, complete drain, inactive partitions and owned results from
+the first run remaining valid after the second. This exercises closed queues;
+it does not define a capacity limit or live-ingress backpressure.
+
 Allocation injection distinguishes coordinator preparation/launch from
 thread-local worker allocations. It verifies unchanged state on failed startup,
 retained committed prefixes and pending heads after worker failures, independent
 worker completion, identical prefix-plus-retry results, source ownership and idle
 paths. These tests are correctness checks, not benchmarks or race-detector runs.
 
-The current Windows MinGW toolchain has no ThreadSanitizer runtime. Dedicated
-race detection remains an open Phase 12 validation item. Live ingress,
-backpressure and asynchronous lifecycle also remain outside this closed-batch API.
+The Windows MinGW toolchain has no ThreadSanitizer runtime, but the three
+concurrency suites now pass under Linux GCC 16.2 with ThreadSanitizer through WSL.
+Run `sh scripts/test-thread-sanitizer.sh` using the
+[README instructions](../README.md#linux-threadsanitizer-tests) to reproduce the
+check. The startup decision uses explicit atomic release/acquire publication in
+addition to the latch, and no sanitizer suppressions are used. This validates the
+closed-batch workloads exercised by the suites. Live ingress, backpressure and
+asynchronous lifecycle remain outside this API.

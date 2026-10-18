@@ -1,4 +1,5 @@
 #include "partitioned_test_support.hpp"
+#include "../examples/partitioned_market_scenario.hpp"
 
 #include <marketlab/threaded_simulation.hpp>
 
@@ -192,6 +193,18 @@ void test_worker_failure_and_prefix_retry() {
         "worker faults did not cover retained prefixes and independent completion");
 }
 
+void test_example_worker_failure() {
+    worker_budget.store(0);
+    bool failed = false;
+    try { static_cast<void>(partitioned_example::run(2, partitioned_example::ExecutionMode::Threaded)); }
+    catch (const std::bad_alloc&) { failed = true; }
+    worker_budget.store(-1);
+    require(failed, "finite example hid a worker allocation failure");
+    const auto fresh = partitioned_example::run(2, partitioned_example::ExecutionMode::Threaded);
+    require(fresh.events.size() == 25 && fresh.worker_steps == std::vector<std::size_t>{7, 4},
+        "fresh example after worker failure retained partial state or unjoined threads");
+}
+
 void test_empty_run_without_allocation() {
     const auto configs = configurations();
     InstrumentRegistry registry{configs};
@@ -213,6 +226,7 @@ int main() {
         test_preparation_and_launch_failure();
         test_worker_failure_and_prefix_retry();
         test_empty_run_without_allocation();
+        test_example_worker_failure();
     } catch (const std::exception& error) {
         coordinator_budget = -1;
         worker_budget.store(-1);
