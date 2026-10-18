@@ -7,7 +7,7 @@ add_library(marketlab INTERFACE)
 target_include_directories(marketlab INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(marketlab INTERFACE cxx_std_23)
 
-foreach(example_name IN ITEMS controlled_market market_making multi_instrument)
+foreach(example_name IN ITEMS controlled_market market_making multi_instrument partitioned_market)
     add_executable(${example_name} examples/${example_name}.cpp)
     target_link_libraries(${example_name} PRIVATE marketlab)
     if(MSVC)
@@ -21,7 +21,8 @@ include(CTest)
 if(BUILD_TESTING)
     foreach(test_name IN ITEMS price aggregate_quantity unsigned_product cash_amount
                                domain instrument_registry worker_assignment_plan
-                               multi_instrument multi_instrument_allocation
+                               multi_instrument multi_instrument_allocation multi_instrument_workload
+                               partitioned_simulation partitioned_simulation_allocation partitioned_market
                                requests orders events
                                event_record market_data time_weighted_spread
                                participant_ledger participant_ledger_allocation

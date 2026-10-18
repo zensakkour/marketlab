@@ -44,8 +44,8 @@ inline std::string event_text(std::span<const ExchangeEvent> events) {
     return output.str();
 }
 
-// Full observable state for this bounded fixture, whose client IDs are 1..8.
-inline std::string state(const Exchange& exchange) {
+// Full observable state for bounded fixtures; include every client ID used by the workload.
+inline std::string state(const Exchange& exchange, std::uint64_t maximum_order_id = 8) {
     std::ostringstream output;
     const auto& config = exchange.instrument();
     output << config.id.value << ' ' << config.symbol << ' ' << config.tick_size.coefficient()
@@ -53,7 +53,7 @@ inline std::string state(const Exchange& exchange) {
            << exchange.current_time().nanoseconds << ' ' << exchange.last_request_sequence().value
            << ' ' << exchange.last_event_sequence().value << ' ' << to_string(exchange.cumulative_volume()) << '\n';
     if (const auto last = exchange.last_trade()) write_event_record(output, *last);
-    for (std::uint64_t id = 1; id <= 8; ++id) {
+    for (std::uint64_t id = 1; id <= maximum_order_id; ++id) {
         if (const auto* resting = exchange.book().find({id})) {
             const auto& accepted = resting->order;
             output << accepted.order_id.value << ' ' << accepted.participant_id.value << ' '

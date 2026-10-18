@@ -51,8 +51,10 @@ demo and regression fixture. Phase 11 adds an immutable
 [single-writer multi-instrument routing](docs/multi-instrument-exchange.md),
 with independent books, clocks, counters, market data and accounting.
 Phase 12 begins with a validated, immutable
-[instrument-to-worker assignment plan](docs/worker-ownership.md). Worker execution,
-ingress queues and lifecycle remain the next steps.
+[instrument-to-worker assignment plan](docs/worker-ownership.md) and a
+[caller-driven partitioned simulation](docs/partitioned-simulation.md), with
+private queues, routed processing and owned step results. Concurrent worker
+execution and threaded lifecycle remain the next steps.
 
 ## Build, run, and test
 
@@ -94,6 +96,14 @@ unknown and duplicate assignments are refused. Idle workers are allowed.
 `worker_for(id)` returns an optional index, and `assignments()` borrows a sorted
 const span; reads allocate nothing. This is fixed configuration for future worker
 ownership. See [worker assignment](docs/worker-ownership.md).
+
+`PartitionedSimulation(registry, plan, participants)` owns one exchange group
+and arrival queue per active worker. `schedule(request)` selects its instrument
+owner; `step(worker_index)` commits that worker's earliest arrival and returns
+its owned events. Scheduling checks the target instrument's committed time;
+engine/allocation failure retains the pending arrival for retry. Arrival sequences
+are worker-local. All calls are serialized, and returned batches follow the
+caller's step order across workers. See [partitioned simulation](docs/partitioned-simulation.md).
 
 For v0, a participant is represented by its `ParticipantId`. Orders and executions
 carry that identity directly. Participant registration belongs to fixed
@@ -393,10 +403,12 @@ build files; building compiles the test executables; CTest runs them. Tests are
 enabled explicitly, and compiler warnings are treated as errors.
 
 A successful test run ends with `100% tests passed, 0 tests failed`.
-Currently there are forty registered tests: `price`, `aggregate_quantity`,
+Currently there are forty-four registered tests: `price`, `aggregate_quantity`,
 `unsigned_product`, `cash_amount`,
 `domain`, `instrument_registry`, `worker_assignment_plan`, `multi_instrument`,
-`multi_instrument_allocation`, `requests`, `orders`,
+`multi_instrument_allocation`, `multi_instrument_workload`,
+`partitioned_simulation`, `partitioned_simulation_allocation`, `partitioned_market`,
+`requests`, `orders`,
 `events`, `event_record`, `market_data`, `time_weighted_spread`, `participant_ledger`,
 `participant_ledger_allocation`, `participant_pnl`, `participant_fills`, `order_id_source`,
 `simulation_random`, `scripted_participant`, `participant_plans`,
@@ -423,6 +435,15 @@ and repeats the literal two-instrument CLI result and event checksum twenty time
 `multi_instrument_allocation` injects every construction/processing allocation
 failure, verifies unchanged target/foreign state and retries identically; lookup
 and unknown routing also run with allocation disabled.
+
+`multi_instrument_workload` compares 18,000 generated requests across 1, 8 and
+32 symbols against isolated exchanges. `partitioned_simulation` repeats 28,800
+requests with 1/4/7 partitions and different worker step orders, comparing each
+instrument's event stream, book, market data, cash, positions and FIFO PnL.
+`partitioned_simulation_allocation` verifies failed construction, scheduling and
+processing retain their inputs/pending arrivals and retry identically.
+`partitioned_market` locks the three-instrument example's literal reports and
+event checksums over repeated runs with 1 through 4 logical workers.
 
 `aggregate_quantity` checks exact 128-bit decimal boundaries, checked overflow,
 constexpr operations and 10,000 generated additions against independent decimal
@@ -665,7 +686,7 @@ cmake --build build/reference-only --target market_making
 ```
 
 On Unix, run `./build/reference-only/market_making 42`.
-All three examples remain available with `BUILD_TESTING=OFF`.
+All four examples remain available with `BUILD_TESTING=OFF`.
 The reference is a correctness regression and future benchmark fixture.
 
 ### Run the multi-instrument scenario
@@ -711,6 +732,54 @@ cmake --build build/multi-only --target multi_instrument
 
 On Unix, run `./build/multi-only/multi_instrument`.
 
+### Run the partitioned scenario
+
+`partitioned_market` schedules ALPHA, BETA and GAMMA into private worker queues.
+The default is two logical workers; choose 1 through 4 to compare partitions.
+This runner is caller-driven: all calls are sequential and it launches no threads.
+
+```powershell
+cmake --build build/debug --target partitioned_market
+.\build\debug\partitioned_market.exe
+$LASTEXITCODE
+.\build\debug\partitioned_market.exe 1
+$LASTEXITCODE
+.\build\debug\partitioned_market.exe 4
+$LASTEXITCODE
+.\build\debug\partitioned_market.exe 2 --events | Set-Content -Encoding ascii -ErrorAction Stop .\build\debug\partitioned-events.log
+$LASTEXITCODE
+```
+
+In a Unix shell:
+
+```sh
+./build/debug/partitioned_market 2
+./build/debug/partitioned_market 2 --events > build/debug/partitioned-events.log
+```
+
+With two workers the first line is
+`workers=2 attempts=12 scheduled=11 refused=1 events=25`.
+Worker 0 processes 7 arrivals and worker 1 processes 4. With four workers, the
+counts are 4, 4, 3 and 0. The three instruments trade 3, 5 and 3 units respectively
+and finish with empty books. Reports include each instrument's clock, counters,
+positions, cash and total PnL at explicit marks 101/201/301 ticks.
+
+Each instrument has identical events and final results for every supported
+partition count. The combined event order follows ascending round-robin worker
+steps and may differ between partition counts. Exit codes are 0 success,
+1 run/output failure and 2 invalid arguments. See
+[ownership, ordering and expected results](docs/partitioned-simulation.md).
+
+For a clean standalone build without tests:
+
+```powershell
+cmake -S . -B build/partitioned-only -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+cmake --build build/partitioned-only --target partitioned_market
+.\build\partitioned-only\partitioned_market.exe 2
+```
+
+On Unix, run `./build/partitioned-only/partitioned_market 2`.
+
 ### Run an executable directly
 
 The runnable targets exercise domain types, book operations, and raw order/cancel
@@ -739,6 +808,14 @@ $LASTEXITCODE
 .\build\debug\multi_instrument_tests.exe
 $LASTEXITCODE
 .\build\debug\multi_instrument_allocation_tests.exe
+$LASTEXITCODE
+.\build\debug\multi_instrument_workload_tests.exe
+$LASTEXITCODE
+.\build\debug\partitioned_simulation_tests.exe
+$LASTEXITCODE
+.\build\debug\partitioned_simulation_allocation_tests.exe
+$LASTEXITCODE
+.\build\debug\partitioned_market_tests.exe
 $LASTEXITCODE
 .\build\debug\requests_tests.exe
 $LASTEXITCODE
@@ -824,6 +901,14 @@ echo $?
 ./build/debug/multi_instrument_tests
 echo $?
 ./build/debug/multi_instrument_allocation_tests
+echo $?
+./build/debug/multi_instrument_workload_tests
+echo $?
+./build/debug/partitioned_simulation_tests
+echo $?
+./build/debug/partitioned_simulation_allocation_tests
+echo $?
+./build/debug/partitioned_market_tests
 echo $?
 ./build/debug/requests_tests
 echo $?
@@ -1095,14 +1180,14 @@ These generated workloads validate correctness.
 ### GCC checked-container tests
 
 GCC/libstdc++ can also check container and iterator operations at runtime in a
-separate build. These commands build and run thirty-five tests covering worker
+separate build. These commands build and run thirty-nine tests covering partitioned simulation, worker
 assignment, controlled participants, accounting,
 exact aggregates, market data, recording, simulation, books and the exchange:
 
 ```powershell
 cmake -S . -B build/checked -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DCMAKE_CXX_FLAGS=-D_GLIBCXX_DEBUG
-cmake --build build/checked --target instrument_registry_tests worker_assignment_plan_tests multi_instrument_tests multi_instrument_allocation_tests order_id_source_tests simulation_random_tests scripted_participant_tests participant_plans_tests participant_allocation_tests participant_integration_tests market_making_tests time_weighted_spread_tests unsigned_product_tests cash_amount_tests participant_ledger_tests participant_ledger_allocation_tests participant_pnl_tests participant_fills_tests aggregate_quantity_tests event_record_tests market_data_tests simulation_tests simulation_queue_tests simulation_queue_allocation_tests simulation_delivery_tests order_book_tests order_book_allocation_tests order_book_matching_tests order_book_limit_tests order_book_cancel_tests order_book_market_tests order_book_invariant_tests exchange_tests exchange_scenario_tests exchange_property_tests
-ctest --test-dir build/checked --output-on-failure -R "^(instrument_registry|worker_assignment_plan|multi_instrument(_allocation)?|order_id_source|simulation_random|scripted_participant|participant_(plans|allocation|integration)|unsigned_product|cash_amount|participant_ledger(_allocation)?|participant_pnl|participant_fills|aggregate_quantity|event_record|market_data|time_weighted_spread|market_making|simulation(_queue(_allocation)?|_delivery)?|order_book(_allocation|_matching|_limit|_cancel|_market|_invariant)?|exchange(_scenario|_property)?)$"
+cmake --build build/checked --target instrument_registry_tests worker_assignment_plan_tests multi_instrument_tests multi_instrument_allocation_tests multi_instrument_workload_tests partitioned_simulation_tests partitioned_simulation_allocation_tests partitioned_market_tests order_id_source_tests simulation_random_tests scripted_participant_tests participant_plans_tests participant_allocation_tests participant_integration_tests market_making_tests time_weighted_spread_tests unsigned_product_tests cash_amount_tests participant_ledger_tests participant_ledger_allocation_tests participant_pnl_tests participant_fills_tests aggregate_quantity_tests event_record_tests market_data_tests simulation_tests simulation_queue_tests simulation_queue_allocation_tests simulation_delivery_tests order_book_tests order_book_allocation_tests order_book_matching_tests order_book_limit_tests order_book_cancel_tests order_book_market_tests order_book_invariant_tests exchange_tests exchange_scenario_tests exchange_property_tests
+ctest --test-dir build/checked --output-on-failure -R "^(instrument_registry|worker_assignment_plan|multi_instrument(_allocation|_workload)?|partitioned_(simulation(_allocation)?|market)|order_id_source|simulation_random|scripted_participant|participant_(plans|allocation|integration)|unsigned_product|cash_amount|participant_ledger(_allocation)?|participant_pnl|participant_fills|aggregate_quantity|event_record|market_data|time_weighted_spread|market_making|simulation(_queue(_allocation)?|_delivery)?|order_book(_allocation|_matching|_limit|_cancel|_market|_invariant)?|exchange(_scenario|_property)?)$"
 ```
 
 Keep this build separate: the flag changes standard-container layouts, so code

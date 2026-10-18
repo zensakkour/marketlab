@@ -2,8 +2,10 @@
 
 Phase 12 starts with fixed configuration in
 `<marketlab/worker_assignment_plan.hpp>`. `WorkerAssignmentPlan` records which
-worker index owns each registered instrument. It creates no threads or queues;
-the existing exchange and simulation entry points retain their current behavior.
+worker index owns each registered instrument. The plan itself creates no threads
+or queues.
+The [caller-driven partitioned simulation](partitioned-simulation.md) uses it to
+own separate exchanges and arrival queues.
 
 ## Construction and validation
 
@@ -58,9 +60,10 @@ const auto owner = plan.worker_for({1}); // Present, value 0; worker 2 is idle.
 ## Execution boundary
 
 This immutable plan is the configuration prerequisite for runtime ownership.
-It does not enforce thread access to books, route requests, advance logical time,
-choose arrival priority or merge events. Worker ingress, publication, lifecycle,
-one-versus-many-worker comparisons and race detection remain later Phase 12 work.
+The caller-driven runner now provides private worker queues and routed step
+results, with one-versus-many-partition correctness comparisons. The plan itself
+does not enforce thread access, route requests or advance time. Concurrent
+ingress, threaded lifecycle and race detection remain later Phase 12 work.
 See [current single-writer routing](multi-instrument-exchange.md).
 
 The `worker_assignment_plan` test covers complete mappings, input permutations,

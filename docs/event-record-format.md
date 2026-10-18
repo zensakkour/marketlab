@@ -89,7 +89,11 @@ each instrument. Identify events by (instrument_id, event_seq), preserve caller
 processing order, and do not infer a global clock or sequence from these values.
 Unknown destinations produce routing diagnostics rather than exchange events,
 so a merged event file alone does not record every attempted arrival.
-See [multi-instrument routing](multi-instrument-exchange.md).
+See [multi-instrument routing](multi-instrument-exchange.md) and
+[partitioned delivery](partitioned-simulation.md). Worker-local arrival sequences
+are separate metadata; the caller publishes committed worker batches in its
+chosen step order. Repartitioning can change cross-instrument interleaving
+without changing any instrument's event stream.
 
 ## Scope
 
