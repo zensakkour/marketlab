@@ -10,6 +10,16 @@
 
 using namespace multi_test;
 
+void test_explicit_random_draw_order() {
+    const auto script = instrument_workload(42, 8, 6);
+    const auto* first = std::get_if<OrderRequest>(&script[1]);
+    const auto* second = std::get_if<OrderRequest>(&script[4]);
+    require(first && second && first->order_id == OrderId{55} && second->order_id == OrderId{23} &&
+        first->side == Side::Buy && first->quantity_units == 3 && first->limit_price_ticks == 93 &&
+        second->side == Side::Buy && second->quantity_units == 4 && second->limit_price_ticks == 94,
+        "seeded workload random draw order changed");
+}
+
 void compare_workload(std::uint64_t seed, std::size_t symbols, std::size_t requests) {
     const auto configs = workload_instruments(symbols);
     InstrumentRegistry registry{configs};
@@ -68,6 +78,7 @@ void compare_workload(std::uint64_t seed, std::size_t symbols, std::size_t reque
 
 int main() {
     try {
+        test_explicit_random_draw_order();
         for (const auto symbols : {1U, 8U, 32U}) {
             for (const auto seed : {0ULL, 42ULL, 20261018ULL}) compare_workload(seed, symbols, 2000);
         }

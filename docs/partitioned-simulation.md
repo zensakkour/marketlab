@@ -6,6 +6,8 @@ Every instrument belongs to exactly one partition under a copied
 [assignment plan](worker-ownership.md). All API calls, including reads and calls
 for different workers, must be serialized by one logical writer. This version
 creates no threads and provides no concurrent ingress or concurrent readers.
+The separate [threaded batch owner](threaded-simulation.md) reuses the same private
+worker processing with exclusive thread ownership and joined result publication.
 
 ## Configuration and ownership
 
@@ -84,8 +86,9 @@ assume that successive worker results have globally increasing timestamps.
 
 Empty steps do not advance time. After drain, scheduling current/future arrivals
 can resume processing with existing IDs and sequences. Construction and scope
-lifetime manage this caller-driven owner; threaded startup, close/drain channels,
-shutdown/join, backpressure and race detection remain later Phase 12 work.
+lifetime manage this caller-driven owner. The separate threaded batch owner
+provides common-gate startup and join-before-publication; live close/drain
+channels, backpressure and race detection remain later Phase 12 work.
 
 Returned results own their events after subsequent steps or owner destruction.
 Accounting and recording remain downstream caller responsibilities. A downstream

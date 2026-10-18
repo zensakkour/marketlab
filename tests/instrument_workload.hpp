@@ -37,9 +37,11 @@ inline std::vector<SimulationRequest> instrument_workload(
         if (category < 3) {
             result.emplace_back(cancel(symbol, id, owner, time));
         } else {
-            auto request = order(symbol, id, owner, *random.uniform(0, 1) == 0 ? Side::Buy : Side::Sell,
-                static_cast<std::int64_t>(*random.uniform(90, 110)),
-                static_cast<std::int64_t>(*random.uniform(1, 20)), time);
+            // Sequence random draws explicitly; function argument order is unspecified.
+            const auto units = static_cast<std::int64_t>(*random.uniform(1, 20));
+            const auto price = static_cast<std::int64_t>(*random.uniform(90, 110));
+            const auto side = *random.uniform(0, 1) == 0 ? Side::Buy : Side::Sell;
+            auto request = order(symbol, id, owner, side, price, units, time);
             if (category == 3 || category == 4) {
                 request.type = OrderType::Market;
                 request.limit_price_ticks.reset();

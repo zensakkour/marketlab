@@ -47,6 +47,48 @@ namespace detail {
     }
     throw std::logic_error{"worker queue contains an unowned instrument"};
 }
+
+// Shared processing for independent owners; a worker's mutable state never escapes
+// either runner. Scheduling and stepping must not overlap for the same worker.
+struct SimulationWorker {
+    using StepResult = std::expected<std::optional<WorkerStep>, PartitionedStepError>;
+
+    SimulationWorker(std::span<const Instrument> instruments, std::span<const ParticipantId> participants)
+        : exchange{InstrumentRegistry{instruments}, participants} {}
+
+    [[nodiscard]] std::expected<SimulationSequence, PartitionedScheduleError> schedule(SimulationRequest request) {
+        const auto id = std::visit([](const auto& value) { return value.instrument_id; }, request);
+        const auto* destination = exchange.find(id);
+        if (!destination) return std::unexpected{PartitionedScheduleError::UnknownInstrument};
+        const auto time = std::visit([](const auto& value) { return value.timestamp; }, request);
+        if (time < destination->current_time()) return std::unexpected{PartitionedScheduleError::InvalidTimestamp};
+        const auto result = queue.schedule(std::move(request));
+        if (result) return *result;
+        switch (result.error()) {
+        case SimulationQueueError::SequenceExhausted: return std::unexpected{PartitionedScheduleError::SequenceExhausted};
+        case SimulationQueueError::CapacityExceeded: return std::unexpected{PartitionedScheduleError::CapacityExceeded};
+        }
+        throw std::logic_error{"queue returned an unknown scheduling error"};
+    }
+
+    [[nodiscard]] StepResult step(std::size_t worker_index) {
+        const auto* arrival = queue.next();
+        if (!arrival) return std::nullopt;
+        auto events = std::visit([&](const auto& request) {
+            if constexpr (std::is_same_v<std::decay_t<decltype(request)>, OrderRequest>) {
+                return exchange.process_order(request);
+            } else return exchange.process_cancel(request);
+        }, arrival->request);
+        if (!events) return std::unexpected{partitioned_step_error(events.error())};
+        // After exchange commit, removal and owned result transfer cannot fail.
+        static_assert(std::is_nothrow_constructible_v<StepResult, WorkerStep&&>);
+        auto removed = queue.pop_next();
+        return WorkerStep{worker_index, std::move(*removed), std::move(*events)};
+    }
+
+    MultiInstrumentExchange exchange;
+    SimulationQueue queue;
+};
 } // namespace detail
 
 // Caller-driven partitions. All calls, including reads, belong to one logical
@@ -89,50 +131,20 @@ public:
         const auto id = std::visit([](const auto& value) { return value.instrument_id; }, request);
         const auto index = plan_.worker_for(id);
         if (!index) return std::unexpected{PartitionedScheduleError::UnknownInstrument};
-        auto& worker = workers_.find(*index)->second;
-        const auto time = std::visit([](const auto& value) { return value.timestamp; }, request);
-        if (time < worker.exchange.find(id)->current_time()) {
-            return std::unexpected{PartitionedScheduleError::InvalidTimestamp};
-        }
-        const auto result = worker.queue.schedule(std::move(request));
-        if (result) return *result;
-        switch (result.error()) {
-        case SimulationQueueError::SequenceExhausted: return std::unexpected{PartitionedScheduleError::SequenceExhausted};
-        case SimulationQueueError::CapacityExceeded: return std::unexpected{PartitionedScheduleError::CapacityExceeded};
-        }
-        throw std::logic_error{"queue returned an unknown scheduling error"};
+        return workers_.find(*index)->second.schedule(std::move(request));
     }
 
     [[nodiscard]] StepResult step(std::size_t worker_index) {
         if (worker_index >= plan_.worker_count()) return std::unexpected{PartitionedStepError::InvalidWorker};
         const auto found = workers_.find(worker_index);
         if (found == workers_.end()) return std::nullopt;
-        auto& worker = found->second;
-        const auto* arrival = worker.queue.next();
-        if (!arrival) return std::nullopt;
-        auto events = std::visit([&](const auto& request) {
-            if constexpr (std::is_same_v<std::decay_t<decltype(request)>, OrderRequest>) {
-                return worker.exchange.process_order(request);
-            } else return worker.exchange.process_cancel(request);
-        }, arrival->request);
-        if (!events) return std::unexpected{detail::partitioned_step_error(events.error())};
-        // After exchange commit, removal and owned result transfer cannot fail.
-        static_assert(std::is_nothrow_constructible_v<StepResult, WorkerStep&&>);
-        auto removed = worker.queue.pop_next();
-        return WorkerStep{worker_index, std::move(*removed), std::move(*events)};
+        return found->second.step(worker_index);
     }
 
 private:
-    struct Worker {
-        Worker(std::span<const Instrument> instruments, std::span<const ParticipantId> participants)
-            : exchange{InstrumentRegistry{instruments}, participants} {}
-        MultiInstrumentExchange exchange;
-        SimulationQueue queue;
-    };
-
     WorkerAssignmentPlan plan_;
     // Only active workers need storage; idle indexes are valid even for large plans.
-    std::map<std::size_t, Worker> workers_;
+    std::map<std::size_t, detail::SimulationWorker> workers_;
 };
 
 } // namespace marketlab

@@ -53,8 +53,10 @@ with independent books, clocks, counters, market data and accounting.
 Phase 12 begins with a validated, immutable
 [instrument-to-worker assignment plan](docs/worker-ownership.md) and a
 [caller-driven partitioned simulation](docs/partitioned-simulation.md), with
-private queues, routed processing and owned step results. Concurrent worker
-execution and threaded lifecycle remain the next steps.
+private queues, routed processing and owned step results.
+[Threaded closed batches](docs/threaded-simulation.md) now process independent
+partitions concurrently with joined, deterministic publication. Live ingress,
+backpressure and race-detector validation remain open.
 
 ## Build, run, and test
 
@@ -104,6 +106,13 @@ its owned events. Scheduling checks the target instrument's committed time;
 engine/allocation failure retains the pending arrival for retry. Arrival sequences
 are worker-local. All calls are serialized, and returned batches follow the
 caller's step order across workers. See [partitioned simulation](docs/partitioned-simulation.md).
+
+`ThreadedSimulation(registry, plan, participants)` accepts scheduled inputs between
+`run()` calls. Each run uses one exclusive thread per nonempty partition, joins
+all writers, and returns owned `WorkerBatch` results sorted by worker index.
+Worker failures retain their committed prefixes and pending heads; failed startup
+processes nothing. Public calls and borrowed-view reads must stay outside the
+active run. See [threaded batches and recovery](docs/threaded-simulation.md).
 
 For v0, a participant is represented by its `ParticipantId`. Orders and executions
 carry that identity directly. Participant registration belongs to fixed
@@ -403,11 +412,12 @@ build files; building compiles the test executables; CTest runs them. Tests are
 enabled explicitly, and compiler warnings are treated as errors.
 
 A successful test run ends with `100% tests passed, 0 tests failed`.
-Currently there are forty-four registered tests: `price`, `aggregate_quantity`,
+Currently there are forty-six registered tests: `price`, `aggregate_quantity`,
 `unsigned_product`, `cash_amount`,
 `domain`, `instrument_registry`, `worker_assignment_plan`, `multi_instrument`,
 `multi_instrument_allocation`, `multi_instrument_workload`,
 `partitioned_simulation`, `partitioned_simulation_allocation`, `partitioned_market`,
+`threaded_simulation`, `threaded_simulation_allocation`,
 `requests`, `orders`,
 `events`, `event_record`, `market_data`, `time_weighted_spread`, `participant_ledger`,
 `participant_ledger_allocation`, `participant_pnl`, `participant_fills`, `order_id_source`,
@@ -437,13 +447,21 @@ failure, verifies unchanged target/foreign state and retries identically; lookup
 and unknown routing also run with allocation disabled.
 
 `multi_instrument_workload` compares 18,000 generated requests across 1, 8 and
-32 symbols against isolated exchanges. `partitioned_simulation` repeats 28,800
+32 symbols against isolated exchanges. Its random draws have an explicit order,
+with a fixed-seed regression prefix independent of argument evaluation order.
+`partitioned_simulation` repeats 28,800
 requests with 1/4/7 partitions and different worker step orders, comparing each
 instrument's event stream, book, market data, cash, positions and FIFO PnL.
 `partitioned_simulation_allocation` verifies failed construction, scheduling and
 processing retain their inputs/pending arrivals and retry identically.
 `partitioned_market` locks the three-instrument example's literal reports and
 event checksums over repeated runs with 1 through 4 logical workers.
+
+`threaded_simulation` compares two consecutive batches against sequential
+partitions and replays the reference experiment on actual threads.
+`threaded_simulation_allocation` injects coordinator and worker failures to check
+the startup gate, preserved committed prefixes, pending-head retry and independent
+worker completion. These tests do not replace race detection.
 
 `aggregate_quantity` checks exact 128-bit decimal boundaries, checked overflow,
 constexpr operations and 10,000 generated additions against independent decimal
@@ -780,6 +798,19 @@ cmake --build build/partitioned-only --target partitioned_market
 
 On Unix, run `./build/partitioned-only/partitioned_market 2`.
 
+### Run the threaded batch tests
+
+The threaded API has dedicated correctness and failure-recovery suites:
+
+```powershell
+cmake --build build/debug --target threaded_simulation_tests threaded_simulation_allocation_tests
+ctest --test-dir build/debug --output-on-failure -R "^threaded_simulation(_allocation)?$"
+```
+
+Both tests are silent on success when run directly. The existing example CLIs
+remain caller-driven. See [threaded configuration, publication and recovery](docs/threaded-simulation.md)
+for the actual-thread API and its boundaries.
+
 ### Run an executable directly
 
 The runnable targets exercise domain types, book operations, and raw order/cancel
@@ -816,6 +847,10 @@ $LASTEXITCODE
 .\build\debug\partitioned_simulation_allocation_tests.exe
 $LASTEXITCODE
 .\build\debug\partitioned_market_tests.exe
+$LASTEXITCODE
+.\build\debug\threaded_simulation_tests.exe
+$LASTEXITCODE
+.\build\debug\threaded_simulation_allocation_tests.exe
 $LASTEXITCODE
 .\build\debug\requests_tests.exe
 $LASTEXITCODE
@@ -909,6 +944,10 @@ echo $?
 ./build/debug/partitioned_simulation_allocation_tests
 echo $?
 ./build/debug/partitioned_market_tests
+echo $?
+./build/debug/threaded_simulation_tests
+echo $?
+./build/debug/threaded_simulation_allocation_tests
 echo $?
 ./build/debug/requests_tests
 echo $?
@@ -1180,14 +1219,14 @@ These generated workloads validate correctness.
 ### GCC checked-container tests
 
 GCC/libstdc++ can also check container and iterator operations at runtime in a
-separate build. These commands build and run thirty-nine tests covering partitioned simulation, worker
+separate build. These commands build and run forty-one tests covering threaded/partitioned simulation, worker
 assignment, controlled participants, accounting,
 exact aggregates, market data, recording, simulation, books and the exchange:
 
 ```powershell
 cmake -S . -B build/checked -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DCMAKE_CXX_FLAGS=-D_GLIBCXX_DEBUG
-cmake --build build/checked --target instrument_registry_tests worker_assignment_plan_tests multi_instrument_tests multi_instrument_allocation_tests multi_instrument_workload_tests partitioned_simulation_tests partitioned_simulation_allocation_tests partitioned_market_tests order_id_source_tests simulation_random_tests scripted_participant_tests participant_plans_tests participant_allocation_tests participant_integration_tests market_making_tests time_weighted_spread_tests unsigned_product_tests cash_amount_tests participant_ledger_tests participant_ledger_allocation_tests participant_pnl_tests participant_fills_tests aggregate_quantity_tests event_record_tests market_data_tests simulation_tests simulation_queue_tests simulation_queue_allocation_tests simulation_delivery_tests order_book_tests order_book_allocation_tests order_book_matching_tests order_book_limit_tests order_book_cancel_tests order_book_market_tests order_book_invariant_tests exchange_tests exchange_scenario_tests exchange_property_tests
-ctest --test-dir build/checked --output-on-failure -R "^(instrument_registry|worker_assignment_plan|multi_instrument(_allocation|_workload)?|partitioned_(simulation(_allocation)?|market)|order_id_source|simulation_random|scripted_participant|participant_(plans|allocation|integration)|unsigned_product|cash_amount|participant_ledger(_allocation)?|participant_pnl|participant_fills|aggregate_quantity|event_record|market_data|time_weighted_spread|market_making|simulation(_queue(_allocation)?|_delivery)?|order_book(_allocation|_matching|_limit|_cancel|_market|_invariant)?|exchange(_scenario|_property)?)$"
+cmake --build build/checked --target instrument_registry_tests worker_assignment_plan_tests multi_instrument_tests multi_instrument_allocation_tests multi_instrument_workload_tests partitioned_simulation_tests partitioned_simulation_allocation_tests partitioned_market_tests threaded_simulation_tests threaded_simulation_allocation_tests order_id_source_tests simulation_random_tests scripted_participant_tests participant_plans_tests participant_allocation_tests participant_integration_tests market_making_tests time_weighted_spread_tests unsigned_product_tests cash_amount_tests participant_ledger_tests participant_ledger_allocation_tests participant_pnl_tests participant_fills_tests aggregate_quantity_tests event_record_tests market_data_tests simulation_tests simulation_queue_tests simulation_queue_allocation_tests simulation_delivery_tests order_book_tests order_book_allocation_tests order_book_matching_tests order_book_limit_tests order_book_cancel_tests order_book_market_tests order_book_invariant_tests exchange_tests exchange_scenario_tests exchange_property_tests
+ctest --test-dir build/checked --output-on-failure -R "^(instrument_registry|worker_assignment_plan|multi_instrument(_allocation|_workload)?|partitioned_(simulation(_allocation)?|market)|threaded_simulation(_allocation)?|order_id_source|simulation_random|scripted_participant|participant_(plans|allocation|integration)|unsigned_product|cash_amount|participant_ledger(_allocation)?|participant_pnl|participant_fills|aggregate_quantity|event_record|market_data|time_weighted_spread|market_making|simulation(_queue(_allocation)?|_delivery)?|order_book(_allocation|_matching|_limit|_cancel|_market|_invariant)?|exchange(_scenario|_property)?)$"
 ```
 
 Keep this build separate: the flag changes standard-container layouts, so code

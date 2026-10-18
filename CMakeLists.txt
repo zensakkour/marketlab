@@ -2,10 +2,13 @@ cmake_minimum_required(VERSION 3.20)
 project(MarketLab LANGUAGES CXX)
 
 set(CMAKE_CXX_EXTENSIONS OFF)
+set(THREADS_PREFER_PTHREAD_FLAG TRUE)
+find_package(Threads REQUIRED)
 
 add_library(marketlab INTERFACE)
 target_include_directories(marketlab INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(marketlab INTERFACE cxx_std_23)
+target_link_libraries(marketlab INTERFACE Threads::Threads)
 
 foreach(example_name IN ITEMS controlled_market market_making multi_instrument partitioned_market)
     add_executable(${example_name} examples/${example_name}.cpp)
@@ -23,6 +26,7 @@ if(BUILD_TESTING)
                                domain instrument_registry worker_assignment_plan
                                multi_instrument multi_instrument_allocation multi_instrument_workload
                                partitioned_simulation partitioned_simulation_allocation partitioned_market
+                               threaded_simulation threaded_simulation_allocation
                                requests orders events
                                event_record market_data time_weighted_spread
                                participant_ledger participant_ledger_allocation
@@ -42,4 +46,5 @@ if(BUILD_TESTING)
         endif()
         add_test(NAME ${test_name} COMMAND ${test_name}_tests)
     endforeach()
+    set_tests_properties(threaded_simulation threaded_simulation_allocation PROPERTIES TIMEOUT 120)
 endif()

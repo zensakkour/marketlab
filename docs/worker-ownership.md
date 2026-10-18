@@ -63,7 +63,9 @@ This immutable plan is the configuration prerequisite for runtime ownership.
 The caller-driven runner now provides private worker queues and routed step
 results, with one-versus-many-partition correctness comparisons. The plan itself
 does not enforce thread access, route requests or advance time. Concurrent
-ingress, threaded lifecycle and race detection remain later Phase 12 work.
+ingress and race detection remain later Phase 12 work. The separate
+[threaded closed-batch runner](threaded-simulation.md) now provides exclusive
+worker threads, a common startup gate and join-before-publication.
 See [current single-writer routing](multi-instrument-exchange.md).
 
 The `worker_assignment_plan` test covers complete mappings, input permutations,
