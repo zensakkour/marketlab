@@ -64,6 +64,8 @@ retained in-flight retry and explicit close/drain.
 Phase 13 starts with an opt-in [exchange benchmark baseline](docs/benchmarks.md):
 matching, cancellation and multi-level sweeps, with exact outcome checks,
 recording comparisons and reproducible measurement metadata.
+The same workloads can measure the direct `OrderBook` API with `--book`, with
+tests checking identical event streams against full exchange processing.
 
 ## Build, run, and test
 
@@ -921,12 +923,15 @@ cmake -S . -B build/benchmark -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTIN
 cmake --build build/benchmark --target exchange_benchmark
 .\build\benchmark\exchange_benchmark.exe match 100000
 .\build\benchmark\exchange_benchmark.exe sweep 100000 --record
+.\build\benchmark\exchange_benchmark.exe match 100000 --book
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/run-exchange-benchmarks.ps1 -Cycles 100000 -Repetitions 5
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/run-exchange-benchmarks.ps1 -Cycles 100000 -Repetitions 5 -Engine all
 ```
 
 The collector saves every repetition and CPU/OS/compiler/source metadata under
 ignored `build/benchmark`. `--record` measures text encoding plus a memory hash
-sink, with no disk I/O in the timed loop. See
+sink, with no disk I/O in the timed loop. `--book` measures the direct book API;
+`-Engine all` collects both book and exchange variants. See
 [exact workloads, clock boundaries and result format](docs/benchmarks.md).
 
 ### Run an executable directly

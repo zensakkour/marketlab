@@ -49,6 +49,8 @@ void test_sink_and_workloads() {
     for (const auto scenario : {bench::Scenario::Match, bench::Scenario::Cancel, bench::Scenario::Sweep}) {
         for (const auto cycles : {1ULL, 2ULL, 17ULL}) {
             const auto plain = bench::run(scenario, cycles, false), recorded = bench::run(scenario, cycles, true);
+            const auto book_plain = bench::run(scenario, cycles, false, true);
+            const auto book_recorded = bench::run(scenario, cycles, true, true);
             const auto script = bench::workload(scenario, cycles);
             std::ostringstream expected_text;
             const std::array ids{ParticipantId{1}, ParticipantId{2}};
@@ -69,14 +71,34 @@ void test_sink_and_workloads() {
                 plain.traded_tick_units == recorded.traded_tick_units && plain.record_bytes == 0 &&
                 recorded.record_bytes == expected_text.str().size() && recorded.record_hash == expected_hash,
                 "recording changed workload outcomes or did not encode the complete event stream");
+            require(!plain.book_only && !recorded.book_only && book_plain.book_only && book_recorded.book_only,
+                "benchmark engine identity is incorrect");
+            const auto width = scenario == bench::Scenario::Sweep ? 4ULL : 2ULL;
+            const auto events_per_cycle = scenario == bench::Scenario::Sweep ? 16ULL : scenario == bench::Scenario::Match ? 6ULL : 3ULL;
+            for (const auto* result : {&plain, &recorded, &book_plain, &book_recorded}) {
+                require(result->requests == cycles * width && result->events == cycles * events_per_cycle &&
+                    result->executions == cycles * (scenario == bench::Scenario::Sweep ? 3ULL : scenario == bench::Scenario::Match ? 1ULL : 0ULL) &&
+                    result->volume_units == cycles * (scenario == bench::Scenario::Sweep ? 6ULL : scenario == bench::Scenario::Match ? 10ULL : 0ULL) &&
+                    result->traded_tick_units == cycles * (scenario == bench::Scenario::Sweep ? 608ULL : scenario == bench::Scenario::Match ? 1000ULL : 0ULL),
+                    "benchmark differs from literal workload totals");
+            }
+            require(book_plain.record_bytes == 0 && book_recorded.record_bytes == recorded.record_bytes &&
+                book_recorded.record_hash == expected_hash,
+                "direct book processing changed the exchange event stream or cancellation sequences");
         }
     }
     for (const auto cycles : {0ULL, bench::maximum_cycles + 1ULL}) {
-        bool refused = false;
-        try { static_cast<void>(bench::workload(bench::Scenario::Match, cycles)); }
-        catch (const std::invalid_argument&) { refused = true; }
-        require(refused, "invalid cycle count accepted");
+        for (const auto book_only : {false, true}) {
+            bool refused = false;
+            try { static_cast<void>(bench::run(bench::Scenario::Match, cycles, false, book_only)); }
+            catch (const std::invalid_argument&) { refused = true; }
+            require(refused, "invalid cycle count accepted");
+        }
     }
+    bool refused_scenario = false;
+    try { static_cast<void>(bench::run(static_cast<bench::Scenario>(99), 1, false, true)); }
+    catch (const std::invalid_argument&) { refused_scenario = true; }
+    require(refused_scenario, "invalid book scenario accepted");
 }
 
 int main() {

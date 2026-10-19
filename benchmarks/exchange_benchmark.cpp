@@ -10,13 +10,13 @@
 namespace bench = marketlab::benchmark;
 
 void usage(std::ostream& output) {
-    output << "usage: exchange_benchmark <match|cancel|sweep> [cycles:1..1000000] [--record]\n";
+    output << "usage: exchange_benchmark <match|cancel|sweep> [cycles:1..1000000] [--record] [--book]\n";
 }
 
 int main(int argc, char** argv) {
     if (argc == 2 && std::string_view{argv[1]} == "--help") { usage(std::cout); return 0; }
     std::uint64_t cycles = 10000;
-    bool valid = argc >= 2 && argc <= 4, seen_cycles = false, record = false;
+    bool valid = argc >= 2 && argc <= 5, seen_cycles = false, record = false, book_only = false;
     bench::Scenario scenario = bench::Scenario::Match;
     if (valid) {
         const std::string_view text{argv[1]};
@@ -27,6 +27,7 @@ int main(int argc, char** argv) {
     for (int index = 2; valid && index < argc; ++index) {
         const std::string_view text{argv[index]};
         if (text == "--record" && !record) record = true;
+        else if (text == "--book" && !book_only) book_only = true;
         else if (!seen_cycles) {
             const auto parsed = std::from_chars(text.data(), text.data() + text.size(), cycles);
             valid = parsed.ec == std::errc{} && parsed.ptr == text.data() + text.size() && cycles > 0 && cycles <= bench::maximum_cycles;
@@ -35,11 +36,12 @@ int main(int argc, char** argv) {
     }
     if (!valid) { usage(std::cerr); return 2; }
     try {
-        const auto result = bench::run(scenario, cycles, record);
+        const auto result = bench::run(scenario, cycles, record, book_only);
         const auto rate = [&](std::uint64_t count) { return static_cast<double>(count) * 1e9 / static_cast<double>(result.wall_ns); };
         std::cout << std::setprecision(17)
             << "{\"schema\":\"marketlab.exchange-benchmark.v1\",\"scenario\":" << std::quoted(bench::name(scenario))
             << ",\"cycles\":" << cycles << ",\"record\":" << (record ? "true" : "false")
+            << ",\"engine\":" << std::quoted(book_only ? "book" : "exchange")
             << ",\"compiler_id\":" << std::quoted(MARKETLAB_BENCHMARK_COMPILER_ID)
             << ",\"compiler_version\":" << std::quoted(MARKETLAB_BENCHMARK_COMPILER_VERSION)
             << ",\"build_config\":" << std::quoted(MARKETLAB_BENCHMARK_BUILD_CONFIG)

@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <ostream>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <streambuf>
@@ -106,45 +107,83 @@ struct Result {
     Scenario scenario;
     std::uint64_t cycles;
     bool record;
+    bool book_only;
     std::uint64_t requests{}, events{}, executions{}, volume_units{}, traded_tick_units{};
     std::int64_t wall_ns{};
     Latency process_ns{};
     std::uint64_t record_bytes{}, record_hash{};
 };
 
-[[nodiscard]] inline Result run(Scenario scenario, std::uint64_t cycles, bool record) {
+[[nodiscard]] inline Result run(Scenario scenario, std::uint64_t cycles, bool record, bool book_only = false) {
     const auto requests = workload(scenario, cycles);
     const std::array participants{ParticipantId{1}, ParticipantId{2}};
-    Exchange exchange{Instrument{{1}, "BENCH", TickSize::from_decimal(1, 0).value()}, participants};
+    std::optional<Exchange> exchange;
+    std::optional<OrderBook> book;
+    std::vector<std::variant<AcceptedOrder, CancelRequest>> accepted;
+    if (book_only) {
+        book.emplace(InstrumentId{1});
+        accepted.reserve(requests.size());
+        for (std::size_t index = 0; index < requests.size(); ++index) {
+            if (const auto* order = std::get_if<OrderRequest>(&requests[index])) {
+                accepted.emplace_back(AcceptedOrder{order->order_id, order->participant_id, order->instrument_id,
+                    order->side, order->type, Quantity::from_units(order->quantity_units).value(),
+                    Price::from_ticks(order->limit_price_ticks.value()).value(), order->timestamp, {index + 1}});
+            } else accepted.emplace_back(std::get<CancelRequest>(requests[index]));
+        }
+    } else exchange.emplace(Instrument{{1}, "BENCH", TickSize::from_decimal(1, 0).value()}, participants);
     std::vector<std::int64_t> samples(requests.size());
     RecordSink sink;
     std::ostream output{&sink};
-    Result result{scenario, cycles, record};
+    Result result{scenario, cycles, record, book_only};
     std::uint64_t rejections = 0;
-    using Clock = std::chrono::steady_clock;
-    static_assert(Clock::is_steady);
-    const auto begin = Clock::now();
-    for (std::size_t index = 0; index < requests.size(); ++index) {
-        const auto start = Clock::now();
-        auto events = std::visit([&](const auto& request) {
-            if constexpr (std::is_same_v<std::decay_t<decltype(request)>, OrderRequest>) return exchange.process_order(request);
-            else return exchange.process_cancel(request);
-        }, requests[index]);
-        const auto end = Clock::now();
-        samples[index] = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
-        if (!events) throw std::runtime_error{"benchmark exchange diagnostic"};
+    std::optional<Execution> last_execution;
+    const auto consume = [&](std::span<const ExchangeEvent> events) {
         ++result.requests;
-        result.events += events->size();
-        for (const auto& event : *events) {
+        result.events += events.size();
+        for (const auto& event : events) {
             if (const auto* execution = std::get_if<Execution>(&event)) {
                 ++result.executions;
                 result.volume_units += static_cast<std::uint64_t>(execution->quantity.units());
                 result.traded_tick_units += static_cast<std::uint64_t>(execution->price.ticks()) *
                     static_cast<std::uint64_t>(execution->quantity.units());
+                last_execution = *execution;
             }
             if (std::holds_alternative<OrderRejected>(event) || std::holds_alternative<CancelRejected>(event)) ++rejections;
             if (record) write_event_record(output, event);
         }
+    };
+    using Clock = std::chrono::steady_clock;
+    static_assert(Clock::is_steady);
+    const auto begin = Clock::now();
+    for (std::size_t index = 0; index < requests.size(); ++index) {
+        const auto start = Clock::now();
+        if (book_only) {
+            // Trusted inputs and caller-owned sequences are prepared outside the
+            // book API. Cancellation returns one record without a vector allocation.
+            if (const auto* order = std::get_if<AcceptedOrder>(&accepted[index])) {
+                auto processed = book->process_order(*order, {result.events + 1});
+                const auto end = Clock::now();
+                samples[index] = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
+                if (!processed) throw std::runtime_error{"benchmark book diagnostic"};
+                consume(processed->events);
+            } else {
+                const auto cancelled = book->cancel(std::get<CancelRequest>(accepted[index]), {index + 1}, {result.events + 1});
+                const auto end = Clock::now();
+                samples[index] = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
+                if (!cancelled) throw std::runtime_error{"benchmark book cancellation diagnostic"};
+                const std::array<ExchangeEvent, 1> events{*cancelled};
+                consume(events);
+            }
+            continue;
+        }
+        auto events = std::visit([&](const auto& request) {
+            if constexpr (std::is_same_v<std::decay_t<decltype(request)>, OrderRequest>) return exchange->process_order(request);
+            else return exchange->process_cancel(request);
+        }, requests[index]);
+        const auto end = Clock::now();
+        samples[index] = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
+        if (!events) throw std::runtime_error{"benchmark exchange diagnostic"};
+        consume(*events);
     }
     const auto end = Clock::now();
     result.wall_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(end - begin).count();
@@ -156,7 +195,8 @@ struct Result {
     const auto fills = scenario == Scenario::Sweep ? 3ULL : scenario == Scenario::Match ? 1ULL : 0ULL;
     const auto units = scenario == Scenario::Sweep ? 6ULL : scenario == Scenario::Match ? 10ULL : 0ULL;
     const auto notional = scenario == Scenario::Sweep ? 608ULL : scenario == Scenario::Match ? 1000ULL : 0ULL;
-    const auto last = exchange.last_trade();
+    const auto last = book_only ? last_execution : exchange->last_trade();
+    const auto& final_book = book_only ? *book : exchange->book();
     const bool last_valid = scenario == Scenario::Cancel ? !last : last &&
         last->aggressive_order_id.value == cycles * width && last->resting_order_id.value == cycles * width - 1 &&
         last->buyer_id == ParticipantId{2} && last->seller_id == ParticipantId{1} &&
@@ -164,10 +204,10 @@ struct Result {
         last->quantity.units() == (scenario == Scenario::Match ? 10 : 3);
     if (result.requests != cycles * width || result.events != cycles * events_per_cycle || result.executions != cycles * fills ||
         result.volume_units != cycles * units || result.traded_tick_units != cycles * notional || rejections != 0 ||
-        !exchange.book().empty() || !exchange.book().check_invariants() || !last_valid ||
-        exchange.last_request_sequence().value != result.requests || exchange.last_event_sequence().value != result.events ||
-        exchange.current_time() != LogicalTime{result.requests - 1} ||
-        to_string(exchange.cumulative_volume()) != std::to_string(result.volume_units) ||
+        !final_book.empty() || !final_book.check_invariants() || !last_valid ||
+        (!book_only && (exchange->last_request_sequence().value != result.requests ||
+        exchange->last_event_sequence().value != result.events || exchange->current_time() != LogicalTime{result.requests - 1} ||
+        to_string(exchange->cumulative_volume()) != std::to_string(result.volume_units))) ||
         !output || (record && result.record_bytes == 0) || (!record && result.record_bytes != 0) || result.wall_ns <= 0) {
         throw std::runtime_error{"benchmark correctness or clock check failed"};
     }

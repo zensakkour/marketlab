@@ -3,6 +3,7 @@ param(
     [string]$BuildDirectory = 'build/benchmark',
     [ValidateRange(1, 1000000)][int]$Cycles = 100000,
     [ValidateRange(1, 100)][int]$Repetitions = 5,
+    [ValidateSet('exchange', 'book', 'all')][string]$Engine = 'exchange',
     [string]$OutputPath = ''
 )
 
@@ -40,14 +41,15 @@ $os = Get-CimInstance Win32_OperatingSystem
 $machine = Get-CimInstance Win32_ComputerSystem
 $created = [DateTime]::UtcNow
 
-function Invoke-Sample([string]$Scenario, [bool]$Record) {
+function Invoke-Sample([string]$Scenario, [bool]$Record, [string]$SampleEngine) {
     $sampleArguments = @($Scenario, [string]$Cycles)
     if ($Record) { $sampleArguments += '--record' }
+    if ($SampleEngine -eq 'book') { $sampleArguments += '--book' }
     $json = & $executable @sampleArguments
     if ($LASTEXITCODE -ne 0) { throw "Benchmark failed: $Scenario record=$Record" }
     $result = ($json -join "`n") | ConvertFrom-Json
     if ($result.schema -ne 'marketlab.exchange-benchmark.v1' -or -not $result.checks_passed -or
-        $result.scenario -ne $Scenario -or $result.cycles -ne $Cycles -or $result.record -ne $Record -or
+        $result.scenario -ne $Scenario -or $result.cycles -ne $Cycles -or $result.record -ne $Record -or $result.engine -ne $SampleEngine -or
         $result.build_config -ne 'Release' -or $result.workers -ne 1 -or $result.instruments -ne 1) {
         throw 'Unexpected benchmark output or configuration.'
     }
@@ -55,24 +57,28 @@ function Invoke-Sample([string]$Scenario, [bool]$Record) {
 }
 
 $samples = [System.Collections.Generic.List[object]]::new()
-foreach ($scenario in @('match', 'cancel', 'sweep')) {
-    foreach ($record in @($false, $true)) {
-        Write-Host "scenario=$scenario record=$record warmup=1 samples=$Repetitions cycles=$Cycles"
-        $warmup = Invoke-Sample $scenario $record
-        for ($index = 1; $index -le $Repetitions; ++$index) {
-            $arguments = @($scenario, [string]$Cycles)
-            if ($record) { $arguments += '--record' }
-            $sample = Invoke-Sample $scenario $record
-            foreach ($field in @('requests', 'events', 'executions', 'volume_units', 'traded_tick_units',
-                                 'record_bytes', 'record_fnv1a64', 'compiler_id', 'compiler_version')) {
-                if ($sample.$field -cne $warmup.$field) { throw "Repeated sample changed deterministic field: $field" }
+$engines = if ($Engine -eq 'all') { @('exchange', 'book') } else { @($Engine) }
+foreach ($sampleEngine in $engines) {
+    foreach ($scenario in @('match', 'cancel', 'sweep')) {
+        foreach ($record in @($false, $true)) {
+            Write-Host "engine=$sampleEngine scenario=$scenario record=$record warmup=1 samples=$Repetitions cycles=$Cycles"
+            $warmup = Invoke-Sample $scenario $record $sampleEngine
+            for ($index = 1; $index -le $Repetitions; ++$index) {
+                $arguments = @($scenario, [string]$Cycles)
+                if ($record) { $arguments += '--record' }
+                if ($sampleEngine -eq 'book') { $arguments += '--book' }
+                $sample = Invoke-Sample $scenario $record $sampleEngine
+                foreach ($field in @('requests', 'events', 'executions', 'volume_units', 'traded_tick_units',
+                                     'record_bytes', 'record_fnv1a64', 'compiler_id', 'compiler_version')) {
+                    if ($sample.$field -cne $warmup.$field) { throw "Repeated sample changed deterministic field: $field" }
+                }
+                $samples.Add([ordered]@{
+                    repetition = $index
+                    executable = $executable
+                    arguments = $arguments
+                    result = $sample
+                })
             }
-            $samples.Add([ordered]@{
-                repetition = $index
-                executable = $executable
-                arguments = $arguments
-                result = $sample
-            })
         }
     }
 }
@@ -90,6 +96,7 @@ $document = [ordered]@{
     build_config = 'Release'
     workers = 1
     instruments = 1
+    engines = @($engines)
     seed = $null
     affinity = 'OS default'
     warmup_processes_per_variant = 1
