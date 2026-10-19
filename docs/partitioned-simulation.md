@@ -87,9 +87,10 @@ assume that successive worker results have globally increasing timestamps.
 Empty steps do not advance time. After drain, scheduling current/future arrivals
 can resume processing with existing IDs and sequences. Construction and scope
 lifetime manage this caller-driven owner. The separate threaded batch owner
-provides common-gate startup and join-before-publication; live close/drain
-channels and backpressure remain later Phase 12 work. The closed-batch runner
-also has Linux ThreadSanitizer validation; see its documentation for scope.
+provides common-gate startup and join-before-publication. The separate
+[streaming owner](streaming-simulation.md) connects bounded live ingress to
+external consumers with retained in-flight retry and close/drain. Both paths
+have Linux ThreadSanitizer validation; see their documentation for scope.
 
 Returned results own their events after subsequent steps or owner destruction.
 Accounting and recording remain downstream caller responsibilities. A downstream

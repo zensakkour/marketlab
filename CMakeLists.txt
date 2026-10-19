@@ -27,6 +27,9 @@ if(BUILD_TESTING)
                                multi_instrument multi_instrument_allocation multi_instrument_workload
                                partitioned_simulation partitioned_simulation_allocation partitioned_market
                                threaded_simulation threaded_simulation_allocation
+                               bounded_ingress_queue bounded_ingress_queue_allocation
+                               bounded_ingress_exchange bounded_ingress_exchange_allocation
+                               streaming_simulation streaming_simulation_allocation
                                requests orders events
                                event_record market_data time_weighted_spread
                                participant_ledger participant_ledger_allocation
@@ -47,5 +50,8 @@ if(BUILD_TESTING)
         add_test(NAME ${test_name} COMMAND ${test_name}_tests)
     endforeach()
     set_tests_properties(threaded_simulation threaded_simulation_allocation partitioned_market
+                         bounded_ingress_queue bounded_ingress_queue_allocation
+                         bounded_ingress_exchange bounded_ingress_exchange_allocation
+                         streaming_simulation streaming_simulation_allocation
                          PROPERTIES TIMEOUT 120)
 endif()

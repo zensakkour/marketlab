@@ -62,9 +62,11 @@ const auto owner = plan.worker_for({1}); // Present, value 0; worker 2 is idle.
 This immutable plan is the configuration prerequisite for runtime ownership.
 The caller-driven runner now provides private worker queues and routed step
 results, with one-versus-many-partition correctness comparisons. The plan itself
-does not enforce thread access, route requests or advance time. Concurrent
-ingress remains later Phase 12 work. Closed-batch race checks now pass under
-Linux ThreadSanitizer. The separate
+does not enforce thread access, route requests or advance time. The separate
+[streaming owner](streaming-simulation.md) now routes bounded concurrent ingress
+to exclusive externally managed consumers, retaining failed arrivals and draining
+after close. These paths and closed batches have Linux ThreadSanitizer checks.
+The separate
 [threaded closed-batch runner](threaded-simulation.md) now provides exclusive
 worker threads, a common startup gate and join-before-publication.
 See [current single-writer routing](multi-instrument-exchange.md).

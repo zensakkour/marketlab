@@ -140,6 +140,39 @@ void test_source_lifetime_and_sparse_configuration() {
     require(refused, "mismatched registry and plan accepted");
 }
 
+void test_results_outlive_owner() {
+    const auto batches = [] {
+        const auto configs = configurations();
+        InstrumentRegistry registry{configs};
+        WorkerAssignmentPlan plan{registry, 2, worker_bindings(registry, 2)};
+        ThreadedSimulation runner{registry, plan, participants};
+        for (const auto& request : std::array<SimulationRequest, 4>{
+            order(1, 1, 1, Side::Buy, 100, 3, 0), order(1, 2, 2, Side::Sell, 100, 3, 1),
+            order(2, 1, 2, Side::Sell, 200, 4, 0), order(2, 2, 1, Side::Buy, 200, 4, 1)}) {
+            require(runner.schedule(request).has_value(), "result lifetime fixture scheduling failed");
+        }
+        return runner.run();
+    }(); // The runner, configuration and plan no longer exist.
+    require(batches.size() == 2, "owned results lost a partition after owner destruction");
+    const auto configs = configurations();
+    InstrumentRegistry registry{configs};
+    for (const auto& batch : batches) {
+        require(batch.succeeded() && batch.steps.size() == 2, "owned results lost committed steps");
+        const InstrumentId id{batch.worker_index + 1};
+        Exchange replay{*registry.find(id), participants};
+        ParticipantLedger ledger{id, participants};
+        for (const auto& step : batch.steps) {
+            const auto expected = isolated_process(replay, step.arrival.request);
+            require(expected && event_text(step.events) == event_text(*expected) &&
+                ledger.apply(executions_in(step.events)).has_value(), "owned results could not be recorded or accounted after destruction");
+        }
+        const auto account = ledger.account({1});
+        const auto quantity = batch.worker_index == 0 ? 3U : 4U;
+        require(account && to_string(account->buy_volume) == std::to_string(quantity) &&
+            account->sell_volume == AggregateQuantity{}, "owned executions changed counterparty or quantity");
+    }
+}
+
 void test_large_uneven_batches() {
     const auto configs = workload_instruments(3);
     InstrumentRegistry registry{configs};
@@ -281,6 +314,7 @@ int main() {
                 for (const auto workers : {1U, 4U, 7U}) compare_workload(seed, symbols, workers);
             }
         }
+        test_results_outlive_owner();
         test_large_uneven_batches();
         test_reference_experiment();
     } catch (const std::exception& error) {

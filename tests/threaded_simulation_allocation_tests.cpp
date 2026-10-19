@@ -193,6 +193,27 @@ void test_worker_failure_and_prefix_retry() {
         "worker faults did not cover retained prefixes and independent completion");
 }
 
+void test_exceptions_outlive_owner() {
+    worker_budget.store(0);
+    const auto batches = [] {
+        const auto configs = configurations();
+        InstrumentRegistry registry{configs};
+        WorkerAssignmentPlan plan{registry, 2, worker_bindings(registry, 2)};
+        ThreadedSimulation runner{registry, plan, participants};
+        prepare(runner);
+        return runner.run();
+    }();
+    worker_budget.store(-1);
+    require(batches.size() == 2, "failed results lost a partition after owner destruction");
+    for (const auto& batch : batches) {
+        require(batch.exception && !batch.error && batch.steps.empty(), "first worker allocation failure lost its exception");
+        bool allocation_error = false;
+        try { std::rethrow_exception(batch.exception); }
+        catch (const std::bad_alloc&) { allocation_error = true; }
+        require(allocation_error, "captured exception did not survive worker and owner destruction");
+    }
+}
+
 void test_example_worker_failure() {
     worker_budget.store(0);
     bool failed = false;
@@ -226,6 +247,7 @@ int main() {
         test_preparation_and_launch_failure();
         test_worker_failure_and_prefix_retry();
         test_empty_run_without_allocation();
+        test_exceptions_outlive_owner();
         test_example_worker_failure();
     } catch (const std::exception& error) {
         coordinator_budget = -1;

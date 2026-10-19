@@ -122,13 +122,21 @@ Allocation injection distinguishes coordinator preparation/launch from
 thread-local worker allocations. It verifies unchanged state on failed startup,
 retained committed prefixes and pending heads after worker failures, independent
 worker completion, identical prefix-plus-retry results, source ownership and idle
-paths. These tests are correctness checks, not benchmarks or race-detector runs.
+paths. Dedicated lifetime checks consume and record successful executions, apply
+them to participant ledgers, and rethrow captured worker allocation exceptions
+after the runner and its source configuration have been destroyed. These tests
+are correctness checks, not benchmarks or race-detector runs.
 
-The Windows MinGW toolchain has no ThreadSanitizer runtime, but the three
+The Windows MinGW toolchain has no ThreadSanitizer runtime, but the
 concurrency suites now pass under Linux GCC 16.2 with ThreadSanitizer through WSL.
 Run `sh scripts/test-thread-sanitizer.sh` using the
 [README instructions](../README.md#linux-threadsanitizer-tests) to reproduce the
 check. The startup decision uses explicit atomic release/acquire publication in
 addition to the latch, and no sanitizer suppressions are used. This validates the
-closed-batch workloads exercised by the suites. Live ingress, backpressure and
-asynchronous lifecycle remain outside this API.
+closed-batch workloads exercised by the suites. The standalone
+[bounded ingress queue](bounded-ingress.md) is tested separately and is not
+connected to this closed-batch runner. The separate
+[streaming owner](streaming-simulation.md) supports live routed ingress and
+external consumers; this API retains its closed-batch lifecycle. The two dedicated threaded suites
+also pass Linux AddressSanitizer and UndefinedBehaviorSanitizer checks, including
+leak detection and result/exception access after owner destruction.

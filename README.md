@@ -56,8 +56,11 @@ Phase 12 begins with a validated, immutable
 private queues, routed processing and owned step results.
 [Threaded closed batches](docs/threaded-simulation.md) now process independent
 partitions concurrently with joined, deterministic publication. Closed-batch
-concurrency tests also pass under Linux ThreadSanitizer. Live ingress and
-backpressure remain open.
+concurrency tests also pass under Linux ThreadSanitizer. A separately tested
+[bounded concurrent ingress queue](docs/bounded-ingress.md) now provides owned
+FIFO transport with retryable backpressure. [Streaming simulation](docs/streaming-simulation.md)
+now routes that ingress to fixed exchange owners, with external consumer threads,
+retained in-flight retry and explicit close/drain.
 
 ## Build, run, and test
 
@@ -413,12 +416,15 @@ build files; building compiles the test executables; CTest runs them. Tests are
 enabled explicitly, and compiler warnings are treated as errors.
 
 A successful test run ends with `100% tests passed, 0 tests failed`.
-Currently there are forty-six registered tests: `price`, `aggregate_quantity`,
+Currently there are fifty-two registered tests: `price`, `aggregate_quantity`,
 `unsigned_product`, `cash_amount`,
 `domain`, `instrument_registry`, `worker_assignment_plan`, `multi_instrument`,
 `multi_instrument_allocation`, `multi_instrument_workload`,
 `partitioned_simulation`, `partitioned_simulation_allocation`, `partitioned_market`,
 `threaded_simulation`, `threaded_simulation_allocation`,
+`bounded_ingress_queue`, `bounded_ingress_queue_allocation`,
+`bounded_ingress_exchange`, `bounded_ingress_exchange_allocation`,
+`streaming_simulation`, `streaming_simulation_allocation`,
 `requests`, `orders`,
 `events`, `event_record`, `market_data`, `time_weighted_spread`, `participant_ledger`,
 `participant_ledger_allocation`, `participant_pnl`, `participant_fills`, `order_id_source`,
@@ -465,8 +471,29 @@ partitions and replays the reference experiment on actual threads. A further
 workers, FIFO fills and result ownership across consecutive runs.
 `threaded_simulation_allocation` injects coordinator and worker failures to check
 the startup gate, preserved committed prefixes, pending-head retry and independent
-worker completion. The dedicated Linux ThreadSanitizer command below runs these
-two suites and the actual-thread CLI regression with race instrumentation.
+worker completion. Lifetime checks record executions, update accounts and rethrow
+captured exceptions after owner destruction. The dedicated Linux ThreadSanitizer
+command below runs these suites, the actual-thread CLI regression and the bounded
+ingress suites with race instrumentation.
+
+`bounded_ingress_queue` checks FIFO payload ownership, monotonic accepted times,
+full refusal/retry, wraparound and close/drain. Concurrent producer/consumer tests
+verify 80,000 mixed requests over capacities 1, 2, 7 and 64.
+`bounded_ingress_queue_allocation` checks constructor failure/retry and operations
+with allocation disabled after construction.
+`bounded_ingress_exchange` sends 43,200 requests through bounded queues into
+thread-owned exchanges, comparing exact events, books, market state and separate
+participant cash/positions/FIFO PnL with the caller-driven runner. It varies two
+seeds, 1/12 instruments, 1/4/7 workers and capacities 1/7/64.
+`bounded_ingress_exchange_allocation` checks that a caller-retained popped arrival
+can be retried after every exchange allocation failure, then drains its queued
+successor without losing or duplicating events. These are component-composition
+tests of existing components. `streaming_simulation` independently repeats the
+43,200-request comparison through the owning streaming API and checks routing,
+copied ownership, partition time, idle indexes and close/drain.
+`streaming_simulation_allocation` verifies automatic retention of in-flight
+requests, the capacity-plus-one bound, independent worker completion, constructor
+retry and nonallocating ingress/read/refusal paths.
 
 `aggregate_quantity` checks exact 128-bit decimal boundaries, checked overflow,
 constexpr operations and 10,000 generated additions against independent decimal
@@ -844,6 +871,41 @@ Both tests are silent on success when run directly. Use `partitioned_market 2
 --threaded` for the actual-thread example; its default mode remains caller-driven.
 See [threaded configuration, publication and recovery](docs/threaded-simulation.md)
 for the actual-thread API and its boundaries.
+
+### Build and test bounded ingress
+
+The standalone queue preallocates its capacity, accepts requests in nondecreasing
+logical-time order, and returns `Full` for retryable backpressure. One producer
+and one consumer may operate concurrently. Close refuses new requests while
+preserving accepted arrivals for draining. The existing threaded runner still
+uses closed batches. `StreamingSimulation` connects this transport to exchanges
+through explicit caller-owned consumers; its contract is documented separately.
+
+```powershell
+cmake --build build/debug --target bounded_ingress_queue_tests bounded_ingress_queue_allocation_tests bounded_ingress_exchange_tests bounded_ingress_exchange_allocation_tests
+ctest --test-dir build/debug --output-on-failure -R "^bounded_ingress_(queue|exchange)(_allocation)?$"
+```
+
+All four transport/composition tests are silent on success when run directly. See the
+[queue API, ownership and failure boundary](docs/bounded-ingress.md).
+
+### Build and test streaming simulation
+
+`StreamingSimulation` takes an instrument registry, fixed worker assignment,
+participants and positive ingress capacity. One producer calls `try_schedule()`
+and `close()` while one external consumer per partition calls `step(worker)`.
+Retry `Full` without advancing input; an exchange failure retains its in-flight
+request automatically. Consumers drain until `Closed`, then the caller joins
+them before reading exchange state or destroying the owner.
+
+```powershell
+cmake --build build/debug --target streaming_simulation_tests streaming_simulation_allocation_tests
+ctest --test-dir build/debug --output-on-failure -R "^streaming_simulation(_allocation)?$"
+```
+
+Tests run actual producer/consumer delivery and failure recovery. The existing
+example CLIs retain their current modes. See
+[streaming roles, diagnostics and lifecycle](docs/streaming-simulation.md).
 
 ### Run an executable directly
 
@@ -1253,14 +1315,14 @@ These generated workloads validate correctness.
 ### GCC checked-container tests
 
 GCC/libstdc++ can also check container and iterator operations at runtime in a
-separate build. These commands build and run forty-one tests covering threaded/partitioned simulation, worker
+separate build. These commands build and run forty-seven tests covering streaming/threaded/partitioned simulation, worker
 assignment, controlled participants, accounting,
 exact aggregates, market data, recording, simulation, books and the exchange:
 
 ```powershell
 cmake -S . -B build/checked -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DCMAKE_CXX_FLAGS=-D_GLIBCXX_DEBUG
-cmake --build build/checked --target instrument_registry_tests worker_assignment_plan_tests multi_instrument_tests multi_instrument_allocation_tests multi_instrument_workload_tests partitioned_simulation_tests partitioned_simulation_allocation_tests partitioned_market_tests threaded_simulation_tests threaded_simulation_allocation_tests order_id_source_tests simulation_random_tests scripted_participant_tests participant_plans_tests participant_allocation_tests participant_integration_tests market_making_tests time_weighted_spread_tests unsigned_product_tests cash_amount_tests participant_ledger_tests participant_ledger_allocation_tests participant_pnl_tests participant_fills_tests aggregate_quantity_tests event_record_tests market_data_tests simulation_tests simulation_queue_tests simulation_queue_allocation_tests simulation_delivery_tests order_book_tests order_book_allocation_tests order_book_matching_tests order_book_limit_tests order_book_cancel_tests order_book_market_tests order_book_invariant_tests exchange_tests exchange_scenario_tests exchange_property_tests
-ctest --test-dir build/checked --output-on-failure -R "^(instrument_registry|worker_assignment_plan|multi_instrument(_allocation|_workload)?|partitioned_(simulation(_allocation)?|market)|threaded_simulation(_allocation)?|order_id_source|simulation_random|scripted_participant|participant_(plans|allocation|integration)|unsigned_product|cash_amount|participant_ledger(_allocation)?|participant_pnl|participant_fills|aggregate_quantity|event_record|market_data|time_weighted_spread|market_making|simulation(_queue(_allocation)?|_delivery)?|order_book(_allocation|_matching|_limit|_cancel|_market|_invariant)?|exchange(_scenario|_property)?)$"
+cmake --build build/checked --target instrument_registry_tests worker_assignment_plan_tests multi_instrument_tests multi_instrument_allocation_tests multi_instrument_workload_tests partitioned_simulation_tests partitioned_simulation_allocation_tests partitioned_market_tests threaded_simulation_tests threaded_simulation_allocation_tests bounded_ingress_queue_tests bounded_ingress_queue_allocation_tests bounded_ingress_exchange_tests bounded_ingress_exchange_allocation_tests streaming_simulation_tests streaming_simulation_allocation_tests order_id_source_tests simulation_random_tests scripted_participant_tests participant_plans_tests participant_allocation_tests participant_integration_tests market_making_tests time_weighted_spread_tests unsigned_product_tests cash_amount_tests participant_ledger_tests participant_ledger_allocation_tests participant_pnl_tests participant_fills_tests aggregate_quantity_tests event_record_tests market_data_tests simulation_tests simulation_queue_tests simulation_queue_allocation_tests simulation_delivery_tests order_book_tests order_book_allocation_tests order_book_matching_tests order_book_limit_tests order_book_cancel_tests order_book_market_tests order_book_invariant_tests exchange_tests exchange_scenario_tests exchange_property_tests
+ctest --test-dir build/checked --output-on-failure -R "^(instrument_registry|worker_assignment_plan|multi_instrument(_allocation|_workload)?|partitioned_(simulation(_allocation)?|market)|threaded_simulation(_allocation)?|bounded_ingress_(queue|exchange)(_allocation)?|streaming_simulation(_allocation)?|order_id_source|simulation_random|scripted_participant|participant_(plans|allocation|integration)|unsigned_product|cash_amount|participant_ledger(_allocation)?|participant_pnl|participant_fills|aggregate_quantity|event_record|market_data|time_weighted_spread|market_making|simulation(_queue(_allocation)?|_delivery)?|order_book(_allocation|_matching|_limit|_cancel|_market|_invariant)?|exchange(_scenario|_property)?)$"
 ```
 
 Keep this build separate: the flag changes standard-container layouts, so code
@@ -1288,7 +1350,10 @@ $LASTEXITCODE
 ```
 
 The script compiles and runs `threaded_simulation_tests`,
-`threaded_simulation_allocation_tests` and `partitioned_market_tests` with
+`threaded_simulation_allocation_tests`, `partitioned_market_tests`,
+`bounded_ingress_queue_tests`, `bounded_ingress_queue_allocation_tests`,
+`bounded_ingress_exchange_tests`, `bounded_ingress_exchange_allocation_tests`,
+`streaming_simulation_tests` and `streaming_simulation_allocation_tests` with
 `-O1 -g -fsanitize=thread -fno-omit-frame-pointer -pthread`, treating compiler
 warnings as errors. `CXX` can select another compatible compiler executable.
 Binaries stay under ignored `build/tsan`; the script works when invoked by an
@@ -1296,10 +1361,38 @@ absolute path from another directory. Git keeps this script's line endings LF.
 
 A compile/test error stops the script immediately. Each test runs with
 `TSAN_OPTIONS=halt_on_error=1:exitcode=66`; no race suppressions are configured.
-Exit 0 means all three suites passed without a sanitizer report; unsupported
+Exit 0 means all nine suites passed without a sanitizer report; unsupported
 non-Linux shells return 2. Missing compiler/runtime errors remain visible.
-These checks exercise the closed-batch API, failure recovery and threaded CLI;
-live ingress is outside their scope. See the
+These checks exercise the closed-batch API, failure recovery, threaded CLI and
+bounded ingress, including exchange delivery through test-owned consumers.
+The streaming suites also cover live routed ingress, retained retry and external
+consumer close/drain. See the
 [GCC instrumentation options](https://gcc.gnu.org/onlinedocs/gcc/Instrumentation-Options.html).
+
+### Linux memory and undefined-behavior tests
+
+For the threaded and bounded-ingress suites, Linux GCC 16.2 also passes AddressSanitizer and
+UndefinedBehaviorSanitizer, including leak detection. From the repository root
+in a Linux/WSL shell:
+
+```sh
+(
+    set -eu
+    mkdir -p build/asan
+    for test_name in threaded_simulation_tests threaded_simulation_allocation_tests \
+                     bounded_ingress_queue_tests bounded_ingress_queue_allocation_tests \
+                     bounded_ingress_exchange_tests bounded_ingress_exchange_allocation_tests \
+                     streaming_simulation_tests streaming_simulation_allocation_tests; do
+        g++ -std=c++23 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -pthread \
+            -Wall -Wextra -Wpedantic -Werror -Iinclude \
+            "tests/$test_name.cpp" -o "build/asan/$test_name"
+        ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 "build/asan/$test_name"
+    done
+)
+```
+
+A compile error, test failure or sanitizer report returns a nonzero status.
+These builds stay separate from ThreadSanitizer and check the same closed-batch
+ownership, recovery and bounded-queue paths.
 
 MarketLab is simulation infrastructure and does not place real trades.
