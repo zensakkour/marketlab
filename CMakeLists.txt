@@ -10,6 +10,21 @@ target_include_directories(marketlab INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/inclu
 target_compile_features(marketlab INTERFACE cxx_std_23)
 target_link_libraries(marketlab INTERFACE Threads::Threads)
 
+option(MARKETLAB_BUILD_BENCHMARKS "Build standalone benchmark executables" OFF)
+if(MARKETLAB_BUILD_BENCHMARKS)
+    add_executable(exchange_benchmark benchmarks/exchange_benchmark.cpp)
+    target_link_libraries(exchange_benchmark PRIVATE marketlab)
+    target_compile_definitions(exchange_benchmark PRIVATE
+        MARKETLAB_BENCHMARK_COMPILER_ID="${CMAKE_CXX_COMPILER_ID}"
+        MARKETLAB_BENCHMARK_COMPILER_VERSION="${CMAKE_CXX_COMPILER_VERSION}"
+        MARKETLAB_BENCHMARK_BUILD_CONFIG="$<CONFIG>")
+    if(MSVC)
+        target_compile_options(exchange_benchmark PRIVATE /W4 /WX)
+    else()
+        target_compile_options(exchange_benchmark PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    endif()
+endif()
+
 foreach(example_name IN ITEMS controlled_market market_making multi_instrument partitioned_market)
     add_executable(${example_name} examples/${example_name}.cpp)
     target_link_libraries(${example_name} PRIVATE marketlab)
@@ -39,7 +54,7 @@ if(BUILD_TESTING)
                                simulation simulation_queue simulation_queue_allocation simulation_delivery
                                order_book order_book_allocation order_book_matching
                                order_book_limit order_book_cancel order_book_market
-                               order_book_invariant exchange exchange_scenario exchange_property)
+                               order_book_invariant exchange exchange_scenario exchange_property exchange_benchmark)
         add_executable(${test_name}_tests tests/${test_name}_tests.cpp)
         target_link_libraries(${test_name}_tests PRIVATE marketlab)
         if(MSVC)

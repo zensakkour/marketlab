@@ -61,6 +61,9 @@ concurrency tests also pass under Linux ThreadSanitizer. A separately tested
 FIFO transport with retryable backpressure. [Streaming simulation](docs/streaming-simulation.md)
 now routes that ingress to fixed exchange owners, with external consumer threads,
 retained in-flight retry and explicit close/drain.
+Phase 13 starts with an opt-in [exchange benchmark baseline](docs/benchmarks.md):
+matching, cancellation and multi-level sweeps, with exact outcome checks,
+recording comparisons and reproducible measurement metadata.
 
 ## Build, run, and test
 
@@ -416,7 +419,7 @@ build files; building compiles the test executables; CTest runs them. Tests are
 enabled explicitly, and compiler warnings are treated as errors.
 
 A successful test run ends with `100% tests passed, 0 tests failed`.
-Currently there are fifty-two registered tests: `price`, `aggregate_quantity`,
+Currently there are fifty-three registered tests: `price`, `aggregate_quantity`,
 `unsigned_product`, `cash_amount`,
 `domain`, `instrument_registry`, `worker_assignment_plan`, `multi_instrument`,
 `multi_instrument_allocation`, `multi_instrument_workload`,
@@ -434,7 +437,7 @@ Currently there are fifty-two registered tests: `price`, `aggregate_quantity`,
 `simulation_queue_allocation`,
 `simulation_delivery`, `order_book`, `order_book_allocation`, `order_book_matching`,
 `order_book_limit`, `order_book_cancel`, `order_book_market`, `order_book_invariant`,
-`exchange`, `exchange_scenario`, and `exchange_property`.
+`exchange`, `exchange_scenario`, `exchange_property`, and `exchange_benchmark`.
 `--output-on-failure` prints diagnostics from failing tests, and CTest returns a
 nonzero exit code on failure.
 
@@ -494,6 +497,8 @@ copied ownership, partition time, idle indexes and close/drain.
 `streaming_simulation_allocation` verifies automatic retention of in-flight
 requests, the capacity-plus-one bound, independent worker completion, constructor
 retry and nonallocating ingress/read/refusal paths.
+`exchange_benchmark` checks workload outcomes, nearest-rank latency statistics
+and complete recorder output; it has no speed thresholds.
 
 `aggregate_quantity` checks exact 128-bit decimal boundaries, checked overflow,
 constexpr operations and 10,000 generated additions against independent decimal
@@ -907,7 +912,27 @@ Tests run actual producer/consumer delivery and failure recovery. The existing
 example CLIs retain their current modes. See
 [streaming roles, diagnostics and lifecycle](docs/streaming-simulation.md).
 
+### Build and run exchange benchmarks
+
+Use a separate Release build; benchmark executables are disabled by default:
+
+```powershell
+cmake -S . -B build/benchmark -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DMARKETLAB_BUILD_BENCHMARKS=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+cmake --build build/benchmark --target exchange_benchmark
+.\build\benchmark\exchange_benchmark.exe match 100000
+.\build\benchmark\exchange_benchmark.exe sweep 100000 --record
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/run-exchange-benchmarks.ps1 -Cycles 100000 -Repetitions 5
+```
+
+The collector saves every repetition and CPU/OS/compiler/source metadata under
+ignored `build/benchmark`. `--record` measures text encoding plus a memory hash
+sink, with no disk I/O in the timed loop. See
+[exact workloads, clock boundaries and result format](docs/benchmarks.md).
+
 ### Run an executable directly
+
+For opt-in Release benchmarks and the Windows metadata collector, see
+[benchmark build/run commands and measurement boundaries](docs/benchmarks.md).
 
 The runnable targets exercise domain types, book operations, and raw order/cancel
 processing. `simulation_delivery_tests` also runs a complete scripted timeline
@@ -1315,14 +1340,14 @@ These generated workloads validate correctness.
 ### GCC checked-container tests
 
 GCC/libstdc++ can also check container and iterator operations at runtime in a
-separate build. These commands build and run forty-seven tests covering streaming/threaded/partitioned simulation, worker
+separate build. These commands build and run forty-eight tests covering benchmarks, streaming/threaded/partitioned simulation, worker
 assignment, controlled participants, accounting,
 exact aggregates, market data, recording, simulation, books and the exchange:
 
 ```powershell
 cmake -S . -B build/checked -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DCMAKE_CXX_FLAGS=-D_GLIBCXX_DEBUG
-cmake --build build/checked --target instrument_registry_tests worker_assignment_plan_tests multi_instrument_tests multi_instrument_allocation_tests multi_instrument_workload_tests partitioned_simulation_tests partitioned_simulation_allocation_tests partitioned_market_tests threaded_simulation_tests threaded_simulation_allocation_tests bounded_ingress_queue_tests bounded_ingress_queue_allocation_tests bounded_ingress_exchange_tests bounded_ingress_exchange_allocation_tests streaming_simulation_tests streaming_simulation_allocation_tests order_id_source_tests simulation_random_tests scripted_participant_tests participant_plans_tests participant_allocation_tests participant_integration_tests market_making_tests time_weighted_spread_tests unsigned_product_tests cash_amount_tests participant_ledger_tests participant_ledger_allocation_tests participant_pnl_tests participant_fills_tests aggregate_quantity_tests event_record_tests market_data_tests simulation_tests simulation_queue_tests simulation_queue_allocation_tests simulation_delivery_tests order_book_tests order_book_allocation_tests order_book_matching_tests order_book_limit_tests order_book_cancel_tests order_book_market_tests order_book_invariant_tests exchange_tests exchange_scenario_tests exchange_property_tests
-ctest --test-dir build/checked --output-on-failure -R "^(instrument_registry|worker_assignment_plan|multi_instrument(_allocation|_workload)?|partitioned_(simulation(_allocation)?|market)|threaded_simulation(_allocation)?|bounded_ingress_(queue|exchange)(_allocation)?|streaming_simulation(_allocation)?|order_id_source|simulation_random|scripted_participant|participant_(plans|allocation|integration)|unsigned_product|cash_amount|participant_ledger(_allocation)?|participant_pnl|participant_fills|aggregate_quantity|event_record|market_data|time_weighted_spread|market_making|simulation(_queue(_allocation)?|_delivery)?|order_book(_allocation|_matching|_limit|_cancel|_market|_invariant)?|exchange(_scenario|_property)?)$"
+cmake --build build/checked --target instrument_registry_tests worker_assignment_plan_tests multi_instrument_tests multi_instrument_allocation_tests multi_instrument_workload_tests partitioned_simulation_tests partitioned_simulation_allocation_tests partitioned_market_tests threaded_simulation_tests threaded_simulation_allocation_tests bounded_ingress_queue_tests bounded_ingress_queue_allocation_tests bounded_ingress_exchange_tests bounded_ingress_exchange_allocation_tests streaming_simulation_tests streaming_simulation_allocation_tests order_id_source_tests simulation_random_tests scripted_participant_tests participant_plans_tests participant_allocation_tests participant_integration_tests market_making_tests time_weighted_spread_tests unsigned_product_tests cash_amount_tests participant_ledger_tests participant_ledger_allocation_tests participant_pnl_tests participant_fills_tests aggregate_quantity_tests event_record_tests market_data_tests simulation_tests simulation_queue_tests simulation_queue_allocation_tests simulation_delivery_tests order_book_tests order_book_allocation_tests order_book_matching_tests order_book_limit_tests order_book_cancel_tests order_book_market_tests order_book_invariant_tests exchange_tests exchange_scenario_tests exchange_property_tests exchange_benchmark_tests
+ctest --test-dir build/checked --output-on-failure -R "^(instrument_registry|worker_assignment_plan|multi_instrument(_allocation|_workload)?|partitioned_(simulation(_allocation)?|market)|threaded_simulation(_allocation)?|bounded_ingress_(queue|exchange)(_allocation)?|streaming_simulation(_allocation)?|order_id_source|simulation_random|scripted_participant|participant_(plans|allocation|integration)|unsigned_product|cash_amount|participant_ledger(_allocation)?|participant_pnl|participant_fills|aggregate_quantity|event_record|market_data|time_weighted_spread|market_making|simulation(_queue(_allocation)?|_delivery)?|order_book(_allocation|_matching|_limit|_cancel|_market|_invariant)?|exchange(_scenario|_property|_benchmark)?)$"
 ```
 
 Keep this build separate: the flag changes standard-container layouts, so code
