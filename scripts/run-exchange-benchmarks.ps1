@@ -69,6 +69,10 @@ function Invoke-Sample([string]$Scenario, [bool]$Record, $Variant) {
         $result.build_config -ne 'Release' -or $result.workers -ne 1 -or $result.instruments -ne $Variant.instruments) {
         throw 'Unexpected benchmark output or configuration.'
     }
+    if ($result.memory.method -ne 'windows_peak_working_set' -or $null -eq $result.memory.peak_resident_bytes -or
+        $result.memory.peak_resident_bytes -le 0) {
+        throw 'Missing or invalid peak process memory measurement.'
+    }
     if ($Variant.engine -eq 'routed' -and ($result.instrument_cycles.Count -ne $Variant.instruments -or
         ($result.instrument_cycles | Measure-Object -Sum).Sum -ne $Cycles)) {
         throw 'Unexpected per-instrument cycle counts.'

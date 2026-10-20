@@ -4,10 +4,43 @@
 #include <exception>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <string_view>
 #include <system_error>
 
+#if defined(_WIN32)
+#include <windows.h>
+#include <psapi.h>
+#elif defined(__linux__)
+#include <sys/resource.h>
+#endif
+
 namespace bench = marketlab::benchmark;
+
+struct ProcessMemory {
+    std::optional<std::uint64_t> peak_resident_bytes;
+    std::string_view method;
+};
+
+[[nodiscard]] ProcessMemory process_memory() {
+#if defined(_WIN32)
+    PROCESS_MEMORY_COUNTERS counters{};
+    counters.cb = static_cast<DWORD>(sizeof(counters));
+    if (!GetProcessMemoryInfo(GetCurrentProcess(), &counters, counters.cb) || counters.PeakWorkingSetSize == 0) {
+        throw std::runtime_error{"cannot read peak process working set"};
+    }
+    return {static_cast<std::uint64_t>(counters.PeakWorkingSetSize), "windows_peak_working_set"};
+#elif defined(__linux__)
+    rusage usage{};
+    if (getrusage(RUSAGE_SELF, &usage) != 0 || usage.ru_maxrss <= 0 ||
+        static_cast<std::uint64_t>(usage.ru_maxrss) > std::numeric_limits<std::uint64_t>::max() / 1024) {
+        throw std::runtime_error{"cannot read peak process resident set"};
+    }
+    return {static_cast<std::uint64_t>(usage.ru_maxrss) * 1024, "linux_getrusage_maxrss"};
+#else
+    return {std::nullopt, "unavailable"};
+#endif
+}
 
 void usage(std::ostream& output) {
     output << "usage: exchange_benchmark <match|cancel|sweep> [cycles:1..1000000] [--record]\n"
@@ -52,6 +85,9 @@ int main(int argc, char** argv) {
         const auto traffic = skewed ? bench::Traffic::Hot : bench::Traffic::Balanced;
         const auto routed = instruments ? std::optional{bench::run_routed(scenario, cycles, record, *instruments, traffic)} : std::nullopt;
         const auto result = routed ? routed->total : bench::run(scenario, cycles, record, book_only);
+        // Read the process high-water mark after owner teardown and validation.
+        // It includes preparation and allocator/runtime memory outside wall_ns.
+        const auto memory = process_memory();
         const auto rate = [&](std::uint64_t count) { return static_cast<double>(count) * 1e9 / static_cast<double>(result.wall_ns); };
         std::cout << std::setprecision(17)
             << "{\"schema\":\"marketlab.exchange-benchmark.v1\",\"scenario\":" << std::quoted(bench::name(scenario))
@@ -81,6 +117,10 @@ int main(int argc, char** argv) {
             }
             std::cout << ']';
         }
+        std::cout << ",\"memory\":{\"peak_resident_bytes\":";
+        if (memory.peak_resident_bytes) std::cout << *memory.peak_resident_bytes;
+        else std::cout << "null";
+        std::cout << ",\"method\":" << std::quoted(memory.method) << '}';
         std::cout << ",\"checks_passed\":true}\n";
         std::cout.flush();
         return std::cout ? 0 : 1;

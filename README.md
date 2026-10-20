@@ -939,6 +939,8 @@ sink, with no disk I/O in the timed loop. `--book` measures the direct book API;
 `--instruments N` selects single-threaded routing; `--skewed` concentrates 90%
 of complete ten-cycle blocks on instrument 1. See
 [exact workloads, clock boundaries and result format](docs/benchmarks.md).
+Each sample also reports peak process resident memory on Windows/Linux, read
+outside the timed loop; the documented scope includes preparation and runtime.
 
 ### Run an executable directly
 

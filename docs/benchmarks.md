@@ -159,8 +159,44 @@ sample as a regression threshold.
 
 On other systems, run the executable directly and capture equivalent hardware,
 OS, compiler flags, source and command metadata before sharing measurements.
-Peak process memory and worker utilization are not measured by this first lot.
-Physical RAM in the collector describes hardware, not benchmark memory usage.
+Worker utilization remains unmeasured. Physical RAM in the collector describes
+hardware; per-process memory appears separately in each sample.
+
+## Process memory
+
+Each successful run reads `memory.peak_resident_bytes` after workload processing,
+validation and owner teardown, before JSON output. The read is outside `wall_ns`
+and `process_ns`. It is the process high-water mark up to that point: input and
+latency buffers, owner state/history, event storage, invariant checks, runtime,
+libraries and allocator behavior can all contribute. Book mode retains both raw
+and accepted input buffers during processing. The value is not a timed-loop-only
+allocation count, isolated engine footprint, private heap size or machine RAM.
+
+On Windows, `memory.method` is `windows_peak_working_set`, using the byte-valued
+`PeakWorkingSetSize` from
+[GetProcessMemoryInfo](https://learn.microsoft.com/en-us/windows/win32/api/psapi/nf-psapi-getprocessmemoryinfo)
+and [PROCESS_MEMORY_COUNTERS](https://learn.microsoft.com/en-us/windows/win32/api/psapi/ns-psapi-process_memory_counters).
+The opt-in executable links the system Psapi library; core and test targets do
+not acquire that dependency. On Linux, the method is `linux_getrusage_maxrss`:
+[`getrusage(RUSAGE_SELF)`](https://man7.org/linux/man-pages/man2/getrusage.2.html)
+reports KiB, converted to bytes with checked bounds. These are OS-specific
+resident-memory metrics; compare runs within the same OS/method and build.
+
+Other platforms emit a null value and method `unavailable`. On supported
+platforms, a failed query exits 1 before publishing JSON. The Windows collector
+requires a positive Windows measurement and retains it for every sample; memory
+values may vary across repetitions and are not compared as deterministic fields.
+Earlier JSON artifacts without `memory` contain no process-memory measurement.
+No memory-size threshold is enforced by correctness tests.
+
+The optional CLI test parses all three scenarios across exchange, book and
+routed modes and validates the platform's memory method and JSON value:
+
+```powershell
+cmake -S . -B build/benchmark-check -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DMARKETLAB_BUILD_BENCHMARKS=ON
+cmake --build build/benchmark-check --target exchange_benchmark
+ctest --test-dir build/benchmark-check --output-on-failure -R "^exchange_benchmark_cli$"
+```
 
 ## Correctness tests
 

@@ -14,6 +14,10 @@ option(MARKETLAB_BUILD_BENCHMARKS "Build standalone benchmark executables" OFF)
 if(MARKETLAB_BUILD_BENCHMARKS)
     add_executable(exchange_benchmark benchmarks/exchange_benchmark.cpp)
     target_link_libraries(exchange_benchmark PRIVATE marketlab)
+    if(WIN32)
+        target_compile_definitions(exchange_benchmark PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX PSAPI_VERSION=1)
+        target_link_libraries(exchange_benchmark PRIVATE psapi)
+    endif()
     target_compile_definitions(exchange_benchmark PRIVATE
         MARKETLAB_BENCHMARK_COMPILER_ID="${CMAKE_CXX_COMPILER_ID}"
         MARKETLAB_BENCHMARK_COMPILER_VERSION="${CMAKE_CXX_COMPILER_VERSION}"
@@ -37,6 +41,18 @@ endforeach()
 
 include(CTest)
 if(BUILD_TESTING)
+    if(MARKETLAB_BUILD_BENCHMARKS)
+        set(benchmark_memory_method unavailable)
+        if(WIN32)
+            set(benchmark_memory_method windows_peak_working_set)
+        elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+            set(benchmark_memory_method linux_getrusage_maxrss)
+        endif()
+        add_test(NAME exchange_benchmark_cli COMMAND ${CMAKE_COMMAND}
+            "-DBENCHMARK=$<TARGET_FILE:exchange_benchmark>"
+            "-DMEMORY_METHOD=${benchmark_memory_method}"
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/exchange_benchmark_cli.cmake)
+    endif()
     foreach(test_name IN ITEMS price aggregate_quantity unsigned_product cash_amount
                                domain instrument_registry worker_assignment_plan
                                multi_instrument multi_instrument_allocation multi_instrument_workload
