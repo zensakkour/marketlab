@@ -1,9 +1,10 @@
-#include "../benchmarks/exchange_benchmark.hpp"
+#include "../benchmarks/routed_benchmark.hpp"
 
 #include <array>
 #include <cstdint>
 #include <exception>
 #include <iostream>
+#include <map>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
@@ -101,7 +102,93 @@ void test_sink_and_workloads() {
     require(refused_scenario, "invalid book scenario accepted");
 }
 
+void test_routing_fixtures() {
+    for (const auto traffic : {bench::Traffic::Balanced, bench::Traffic::Hot}) {
+        const auto script = bench::routed_workload(bench::Scenario::Cancel, 40, 4, traffic);
+        std::array<std::uint64_t, 4> loads{};
+        for (std::size_t cycle = 0; cycle < 40; ++cycle) {
+            const auto& order = std::get<OrderRequest>(script[2 * cycle]);
+            const auto& cancel = std::get<CancelRequest>(script[2 * cycle + 1]);
+            const auto expected = traffic == bench::Traffic::Balanced ? cycle % 4 + 1 :
+                cycle == 9 || cycle == 39 ? 2ULL : cycle == 19 ? 3ULL : cycle == 29 ? 4ULL : 1ULL;
+            require(order.instrument_id.value == expected && cancel.instrument_id == order.instrument_id &&
+                order.order_id.value == 2 * cycle + 1 && cancel.target_order_id == order.order_id &&
+                order.timestamp == LogicalTime{2 * cycle} && cancel.timestamp == LogicalTime{2 * cycle + 1},
+                "routing changed the fixed request order, clock, identity or distribution");
+            ++loads[order.instrument_id.value - 1];
+        }
+        const auto expected = traffic == bench::Traffic::Balanced ? std::array<std::uint64_t, 4>{10, 10, 10, 10} :
+            std::array<std::uint64_t, 4>{36, 2, 1, 1};
+        require(loads == expected, "routing does not match literal balanced/hot counts");
+    }
+    for (const auto count : std::array<std::uint64_t, 2>{0, bench::maximum_instruments + 1}) {
+        bool refused = false;
+        try { static_cast<void>(bench::run_routed(bench::Scenario::Match, 1, false, count, bench::Traffic::Balanced)); }
+        catch (const std::invalid_argument&) { refused = true; }
+        require(refused, "out-of-range instrument count accepted");
+    }
+    for (const auto traffic : {bench::Traffic::Hot, static_cast<bench::Traffic>(99)}) {
+        bool refused = false;
+        try { bench::validate_routing(1, traffic); } catch (const std::invalid_argument&) { refused = true; }
+        require(refused, "invalid traffic/instrument combination accepted");
+    }
+}
+
+void test_routed_results() {
+    const std::array participants{ParticipantId{1}, ParticipantId{2}};
+    for (const auto scenario : {bench::Scenario::Match, bench::Scenario::Cancel, bench::Scenario::Sweep}) {
+        for (const auto instruments : {1ULL, 4ULL, 16ULL, 256ULL}) {
+            for (const auto traffic : {bench::Traffic::Balanced, bench::Traffic::Hot}) {
+                if (instruments == 1 && traffic == bench::Traffic::Hot) continue;
+                for (const auto cycles : {1ULL, 11ULL, 40ULL}) {
+                    const auto actual = bench::run_routed(scenario, cycles, true, instruments, traffic);
+                    const auto plain = bench::run_routed(scenario, cycles, false, instruments, traffic);
+                    std::map<InstrumentId, Exchange> isolated;
+                    for (std::uint64_t id = 1; id <= instruments; ++id) {
+                        isolated.try_emplace(InstrumentId{id},
+                            Instrument{{id}, "ISOLATED", TickSize::from_decimal(1, 0).value()}, participants);
+                    }
+                    std::ostringstream expected_text;
+                    const auto script = bench::routed_workload(scenario, cycles, instruments, traffic);
+                    for (const auto& request : script) {
+                        const auto events = std::visit([&](const auto& value) {
+                            auto& owner = isolated.at(value.instrument_id);
+                            if constexpr (std::is_same_v<std::decay_t<decltype(value)>, OrderRequest>) return owner.process_order(value);
+                            else return owner.process_cancel(value);
+                        }, request);
+                        require(events.has_value(), "isolated benchmark replay diagnostic");
+                        for (const auto& event : *events) write_event_record(expected_text, event);
+                    }
+                    std::uint64_t hash = 14695981039346656037ULL;
+                    for (const unsigned char byte : expected_text.str()) hash = (hash ^ byte) * 1099511628211ULL;
+                    const auto& total = actual.total;
+                    require(actual.traffic == traffic && actual.loads.size() == instruments && !total.book_only &&
+                        total.requests == script.size() && total.events == plain.total.events &&
+                        total.executions == plain.total.executions && total.volume_units == plain.total.volume_units &&
+                        total.traded_tick_units == plain.total.traded_tick_units && plain.total.record_bytes == 0 &&
+                        total.record_bytes == expected_text.str().size() && total.record_hash == hash,
+                        "routed benchmark differs from isolated events or recording changes outcomes");
+                    std::uint64_t counted_cycles = 0;
+                    const auto width = scenario == bench::Scenario::Sweep ? 4ULL : 2ULL;
+                    for (std::size_t index = 0; index < actual.loads.size(); ++index) {
+                        const auto& owner = isolated.at({index + 1});
+                        require(owner.last_request_sequence().value == actual.loads[index].cycles * width,
+                            "reported instrument cycle count differs from isolated requests");
+                        counted_cycles += actual.loads[index].cycles;
+                    }
+                    require(counted_cycles == cycles, "routed cycle total differs");
+                    if (instruments == 1) {
+                        const auto single = bench::run(scenario, cycles, true);
+                        require(total.record_bytes == single.record_bytes && total.record_hash == single.record_hash,
+                            "single-instrument routing changed the original exchange workload");
+                    }
+                }
+            }
+        }
+    }
+}
+
 int main() {
-    try { test_latency_ranks(); test_sink_and_workloads(); }
+    try { test_latency_ranks(); test_sink_and_workloads(); test_routing_fixtures(); test_routed_results(); }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

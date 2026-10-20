@@ -66,6 +66,8 @@ matching, cancellation and multi-level sweeps, with exact outcome checks,
 recording comparisons and reproducible measurement metadata.
 The same workloads can measure the direct `OrderBook` API with `--book`, with
 tests checking identical event streams against full exchange processing.
+Routed benchmarks now cover balanced and concentrated activity over up to 256
+instruments on one thread, with per-instrument outcome checks.
 
 ## Build, run, and test
 
@@ -924,14 +926,18 @@ cmake --build build/benchmark --target exchange_benchmark
 .\build\benchmark\exchange_benchmark.exe match 100000
 .\build\benchmark\exchange_benchmark.exe sweep 100000 --record
 .\build\benchmark\exchange_benchmark.exe match 100000 --book
+.\build\benchmark\exchange_benchmark.exe match 100000 --instruments 16 --skewed
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/run-exchange-benchmarks.ps1 -Cycles 100000 -Repetitions 5
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/run-exchange-benchmarks.ps1 -Cycles 100000 -Repetitions 5 -Engine all
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/run-exchange-benchmarks.ps1 -Cycles 100000 -Repetitions 5 -Engine routed -Instruments 16 -Traffic all
 ```
 
 The collector saves every repetition and CPU/OS/compiler/source metadata under
 ignored `build/benchmark`. `--record` measures text encoding plus a memory hash
 sink, with no disk I/O in the timed loop. `--book` measures the direct book API;
-`-Engine all` collects both book and exchange variants. See
+`-Engine all` collects both book and exchange variants.
+`--instruments N` selects single-threaded routing; `--skewed` concentrates 90%
+of complete ten-cycle blocks on instrument 1. See
 [exact workloads, clock boundaries and result format](docs/benchmarks.md).
 
 ### Run an executable directly
